@@ -1,0 +1,30 @@
+# Basic vessel.toml example
+# A simple web application deployment
+
+[[app]]
+name = "web"
+image = "nginx:alpine"
+instances = 1
+domains = ["example.com"]
+
+[app.resources]
+cpu = 100
+memory = "128MB"
+pids = 50
+
+[[app.port]]
+host = 8080
+container = 80
+protocol = "tcp"
+
+[app.health_check]
+type = "http"
+path = "/"
+port = 80
+interval = "30s"
+timeout = "5s"
+retries = 3
+
+[app.deploy]
+strategy = "rolling"
+grace_period = "30s"

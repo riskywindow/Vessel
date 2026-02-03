@@ -1,0 +1,57 @@
+# Binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# Dependency directories
+/vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+/dist/
+
+# Local configuration
+vessel.toml
+*.local.toml
+
+# Database
+*.db
+
+# Logs
+*.log
+
+# Secrets
+*.enc
+*.key
+*.pem
+
+# Temporary files
+/tmp/
+
+CLAUDE.md
+
+PROGRESS.md

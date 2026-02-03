@@ -1,0 +1,77 @@
+# Full vessel.toml example
+# Demonstrates all configuration options
+
+# Global settings
+data_dir = "/var/lib/vessel"
+log_level = "info"
+api_address = "127.0.0.1"
+api_port = 9477
+
+# Web application
+[[app]]
+name = "api"
+image = "myorg/api:v1.2.3"
+instances = 3
+command = ["/app/server", "--port=8080"]
+domains = ["api.example.com", "api.example.org"]
+
+[app.env]
+NODE_ENV = "production"
+LOG_LEVEL = "info"
+
+[app.resources]
+cpu = 200          # 200% = 2 cores
+memory = "512MB"
+swap = "-1"        # Same as memory
+pids = 100
+
+[[app.port]]
+host = 0           # Auto-assign
+container = 8080
+protocol = "tcp"
+
+[app.health_check]
+type = "http"
+path = "/health"
+port = 8080
+interval = "15s"
+timeout = "3s"
+retries = 3
+start_period = "30s"
+
+[app.deploy]
+strategy = "blue-green"
+grace_period = "60s"
+healthy_threshold = 2
+unhealthy_threshold = 3
+
+[[app.volume]]
+host = "/data/uploads"
+container = "/app/uploads"
+readonly = false
+
+# Background worker
+[[app]]
+name = "worker"
+image = "myorg/worker:v1.2.3"
+instances = 2
+command = ["/app/worker", "--queue=default"]
+
+[app.env]
+REDIS_URL = "redis://localhost:6379"
+
+[app.resources]
+cpu = 100
+memory = "256MB"
+pids = 50
+
+[app.health_check]
+type = "command"
+command = ["/app/healthcheck.sh"]
+interval = "30s"
+timeout = "10s"
+retries = 3
+
+[app.deploy]
+strategy = "rolling"
+grace_period = "120s"

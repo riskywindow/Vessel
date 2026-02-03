@@ -1,0 +1,28 @@
+[Unit]
+Description=Vessel Container Orchestrator
+Documentation=https://github.com/vessel/vessel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vessel daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security settings
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=read-only
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vessel
+
+[Install]
+WantedBy=multi-user.target
