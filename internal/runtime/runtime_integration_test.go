@@ -377,3 +377,264 @@ func TestMultipleContainers(t *testing.T) {
 		rt.RemoveContainer(ctx, id)
 	}
 }
+
+// TestOCIImagePull tests pulling an OCI image from a registry.
+func TestOCIImagePull(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("integration tests require root privileges")
+	}
+
+	ctx := context.Background()
+
+	// Create image store
+	store, err := NewImageStore()
+	if err != nil {
+		t.Fatalf("failed to create image store: %v", err)
+	}
+
+	// Pull alpine:latest
+	t.Log("Pulling alpine:latest...")
+	digest, err := store.PullImage(ctx, "alpine:latest")
+	if err != nil {
+		t.Fatalf("failed to pull image: %v", err)
+	}
+	t.Logf("Pulled image with digest: %s", digest)
+
+	// Verify layers exist on disk
+	layerPaths, err := store.GetLayerPaths(digest)
+	if err != nil {
+		t.Fatalf("failed to get layer paths: %v", err)
+	}
+	if len(layerPaths) == 0 {
+		t.Error("expected at least one layer")
+	}
+	t.Logf("Found %d layers", len(layerPaths))
+
+	for i, path := range layerPaths {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("layer %d path does not exist: %s", i, path)
+		}
+		// Verify it has some content (standard alpine directories)
+		binPath := filepath.Join(path, "bin")
+		if _, err := os.Stat(binPath); err == nil {
+			t.Logf("Layer %d contains /bin directory", i)
+		}
+	}
+
+	// Verify metadata
+	metadata, err := store.GetImage(digest)
+	if err != nil {
+		t.Fatalf("failed to get metadata: %v", err)
+	}
+	if metadata.Reference != "alpine:latest" {
+		t.Errorf("expected reference 'alpine:latest', got '%s'", metadata.Reference)
+	}
+	if metadata.Layers == 0 {
+		t.Error("expected at least one layer in metadata")
+	}
+
+	// Test that pulling again is a no-op (cached)
+	t.Log("Pulling again (should be cached)...")
+	digest2, err := store.PullImage(ctx, "alpine:latest")
+	if err != nil {
+		t.Fatalf("failed to pull cached image: %v", err)
+	}
+	if digest2 != digest {
+		t.Errorf("expected same digest, got %s vs %s", digest2, digest)
+	}
+}
+
+// TestOCIContainerWithOverlayFS tests running a container with an OCI image and OverlayFS.
+func TestOCIContainerWithOverlayFS(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("integration tests require root privileges")
+	}
+	if VesselBinaryPath == "" {
+		t.Skip("vessel binary not found")
+	}
+
+	ctx := context.Background()
+
+	rt, err := NewLinuxRuntime()
+	if err != nil {
+		t.Fatalf("failed to create runtime: %v", err)
+	}
+
+	// Create container with alpine image
+	t.Log("Creating container with alpine:latest...")
+	container, err := rt.CreateContainer(ctx, ContainerOpts{
+		Name:    "test-alpine-overlay",
+		Image:   "alpine:latest",
+		Command: []string{"ls", "/"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create container: %v", err)
+	}
+	defer rt.RemoveContainer(ctx, container.ID)
+
+	// Verify OverlayFS is set up
+	mergedDir := "/var/lib/vessel/containers/" + container.ID + "/merged"
+	if _, err := os.Stat(mergedDir); err != nil {
+		t.Fatalf("merged directory does not exist: %s", mergedDir)
+	}
+
+	// Start container
+	t.Log("Starting container...")
+	if err := rt.StartContainer(ctx, container.ID); err != nil {
+		t.Fatalf("failed to start container: %v", err)
+	}
+
+	// Wait for container to complete
+	time.Sleep(2 * time.Second)
+
+	// Read logs
+	logs, err := rt.ContainerLogs(ctx, container.ID, false, 0)
+	if err != nil {
+		t.Fatalf("failed to get logs: %v", err)
+	}
+	logData, err := io.ReadAll(logs)
+	logs.Close()
+	if err != nil {
+		t.Fatalf("failed to read logs: %v", err)
+	}
+
+	lsOutput := string(logData)
+	t.Logf("ls output:\n%s", lsOutput)
+
+	// Verify standard alpine filesystem layout
+	expectedDirs := []string{"bin", "etc", "lib", "usr", "var"}
+	for _, dir := range expectedDirs {
+		if !strings.Contains(lsOutput, dir) {
+			t.Errorf("expected '%s' in ls output", dir)
+		}
+	}
+}
+
+// TestOverlayFSWriteIsolation tests that writes inside the container don't affect image layers.
+func TestOverlayFSWriteIsolation(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("integration tests require root privileges")
+	}
+	if VesselBinaryPath == "" {
+		t.Skip("vessel binary not found")
+	}
+
+	ctx := context.Background()
+
+	rt, err := NewLinuxRuntime()
+	if err != nil {
+		t.Fatalf("failed to create runtime: %v", err)
+	}
+
+	// Create container that writes a file
+	t.Log("Creating container that writes a file...")
+	container, err := rt.CreateContainer(ctx, ContainerOpts{
+		Name:    "test-overlay-write",
+		Image:   "alpine:latest",
+		Command: []string{"sh", "-c", "touch /testfile && ls /testfile"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create container: %v", err)
+	}
+
+	containerID := container.ID
+	upperDir := "/var/lib/vessel/containers/" + containerID + "/upper"
+
+	// Start container
+	if err := rt.StartContainer(ctx, containerID); err != nil {
+		t.Fatalf("failed to start container: %v", err)
+	}
+
+	// Wait for container to complete
+	time.Sleep(2 * time.Second)
+
+	// Read logs
+	logs, err := rt.ContainerLogs(ctx, containerID, false, 0)
+	if err != nil {
+		t.Fatalf("failed to get logs: %v", err)
+	}
+	logData, err := io.ReadAll(logs)
+	logs.Close()
+	if err != nil {
+		t.Fatalf("failed to read logs: %v", err)
+	}
+
+	output := strings.TrimSpace(string(logData))
+	t.Logf("output: %s", output)
+
+	if output != "/testfile" {
+		t.Errorf("expected '/testfile', got '%s'", output)
+	}
+
+	// Verify the file appears in the upper layer
+	upperTestFile := filepath.Join(upperDir, "testfile")
+	if _, err := os.Stat(upperTestFile); err != nil {
+		t.Logf("Note: testfile in upper dir: %v (might be unmounted already)", err)
+	}
+
+	// Verify the file does NOT exist in image layers
+	store := rt.GetImageStore()
+	metadata, _ := store.GetImageByRef("alpine:latest")
+	if metadata != nil {
+		layerPaths, _ := store.GetLayerPaths(metadata.Digest)
+		for i, layerPath := range layerPaths {
+			testFilePath := filepath.Join(layerPath, "testfile")
+			if _, err := os.Stat(testFilePath); err == nil {
+				t.Errorf("testfile found in image layer %d, expected write isolation", i)
+			}
+		}
+	}
+
+	// Clean up
+	rt.RemoveContainer(ctx, containerID)
+
+	// Verify container directory is cleaned up
+	containerDir := "/var/lib/vessel/containers/" + containerID
+	if _, err := os.Stat(containerDir); err == nil {
+		t.Errorf("container directory still exists after removal: %s", containerDir)
+	}
+}
+
+// TestImageRemoval tests that removing an image cleans up properly.
+func TestImageRemoval(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("integration tests require root privileges")
+	}
+
+	ctx := context.Background()
+
+	store, err := NewImageStore()
+	if err != nil {
+		t.Fatalf("failed to create image store: %v", err)
+	}
+
+	// Pull a small image
+	t.Log("Pulling alpine:latest...")
+	digest, err := store.PullImage(ctx, "alpine:latest")
+	if err != nil {
+		t.Fatalf("failed to pull image: %v", err)
+	}
+
+	// Verify it exists
+	digestDir := strings.ReplaceAll(digest, ":", "-")
+	imageDir := filepath.Join("/var/lib/vessel/images", digestDir)
+	if _, err := os.Stat(imageDir); err != nil {
+		t.Fatalf("image directory does not exist: %s", imageDir)
+	}
+
+	// Remove the image
+	t.Log("Removing image...")
+	if err := store.RemoveImage(digest); err != nil {
+		t.Fatalf("failed to remove image: %v", err)
+	}
+
+	// Verify it's gone
+	if _, err := os.Stat(imageDir); err == nil {
+		t.Errorf("image directory still exists after removal: %s", imageDir)
+	}
+
+	// Verify GetImage returns error
+	if _, err := store.GetImage(digest); err == nil {
+		t.Error("expected error getting removed image")
+	}
+}

@@ -14,8 +14,6 @@ import (
 )
 
 var (
-	runImage   string
-	runCommand []string
 	runName    string
 	runEnv     []string
 	runWorkDir string
@@ -23,21 +21,24 @@ var (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run [flags] -- [command]",
+	Use:   "run [flags] IMAGE [-- COMMAND [ARGS...]]",
 	Short: "Run a container",
-	Long: `Run a container with the specified image and command.
+	Long: `Run a container with the specified image and optional command.
+
+If no command is specified, the image's default entrypoint/cmd is used.
 
 Examples:
-  vessel run --image busybox -- echo hello
-  vessel run --image busybox --name mycontainer -- sh -c "echo hello && sleep 5"
-  vessel run --image busybox --rm -- hostname`,
+  vessel run alpine:latest -- echo hello
+  vessel run --name mycontainer alpine:latest -- sh -c "echo hello"
+  vessel run --rm --env FOO=bar alpine:latest -- sh -c 'echo $FOO'
+  vessel run nginx:alpine`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: runContainer,
 }
 
 func init() {
-	runCmd.Flags().StringVarP(&runImage, "image", "i", "busybox", "image to use (currently only 'busybox' supported)")
 	runCmd.Flags().StringVarP(&runName, "name", "n", "", "container name")
-	runCmd.Flags().StringArrayVarP(&runEnv, "env", "e", nil, "environment variables")
+	runCmd.Flags().StringArrayVarP(&runEnv, "env", "e", nil, "environment variables (KEY=VALUE)")
 	runCmd.Flags().StringVarP(&runWorkDir, "workdir", "w", "", "working directory inside container")
 	runCmd.Flags().BoolVar(&runRm, "rm", false, "automatically remove container when it exits")
 
@@ -45,10 +46,12 @@ func init() {
 }
 
 func runContainer(cmd *cobra.Command, args []string) error {
-	// Parse command from args
-	runCommand = args
-	if len(runCommand) == 0 {
-		runCommand = []string{"/bin/sh"}
+	// Parse image and command from args
+	// First arg is the image, remaining args are the command
+	image := args[0]
+	var runCommand []string
+	if len(args) > 1 {
+		runCommand = args[1:]
 	}
 
 	// Check for root privileges
@@ -74,19 +77,17 @@ func runContainer(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create runtime: %w", err)
 	}
 
-	// Set up environment
+	// Set up environment - add TERM from host, then user-provided vars
 	env := []string{
-		"PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin",
-		"HOME=/root",
 		"TERM=" + os.Getenv("TERM"),
 	}
 	env = append(env, runEnv...)
 
-	// Create container
-	fmt.Printf("Creating container with image '%s'...\n", runImage)
+	// Create container (this pulls the image if needed)
+	fmt.Printf("Creating container with image '%s'...\n", image)
 	container, err := rt.CreateContainer(ctx, runtime.ContainerOpts{
 		Name:    runName,
-		Image:   runImage,
+		Image:   image,
 		Command: runCommand,
 		Env:     env,
 		WorkDir: runWorkDir,

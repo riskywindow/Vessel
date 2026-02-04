@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/vessel/vessel/internal/paths"
 	"golang.org/x/sys/unix"
 )
 
@@ -349,6 +350,86 @@ func UnmountOverlay(mergedDir string) error {
 			return fmt.Errorf("failed to unmount overlay: %w", err)
 		}
 	}
+	return nil
+}
+
+// SetupOverlayFS creates the OverlayFS mount for a container using image layers.
+// It returns the merged directory path which becomes the container's rootfs.
+func SetupOverlayFS(containerID string, layerPaths []string) (string, error) {
+	containerDir := paths.ContainerDir(containerID)
+	upperDir := paths.ContainerUpperDir(containerID)
+	workDir := paths.ContainerWorkDir(containerID)
+	mergedDir := paths.ContainerMergedDir(containerID)
+
+	// Create the container directory structure
+	for _, dir := range []string{containerDir, upperDir, workDir, mergedDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create %s: %w", dir, err)
+		}
+	}
+
+	// Ensure workdir is empty (required by OverlayFS)
+	workEntries, _ := os.ReadDir(workDir)
+	if len(workEntries) > 0 {
+		os.RemoveAll(workDir)
+		if err := os.MkdirAll(workDir, 0755); err != nil {
+			return "", fmt.Errorf("failed to recreate workdir: %w", err)
+		}
+	}
+
+	// Build lowerdir string - OverlayFS wants layers from TOP to BOTTOM
+	// Our layerPaths are ordered from bottom (0) to top (n-1), so we reverse
+	reversedLayers := make([]string, len(layerPaths))
+	for i, path := range layerPaths {
+		reversedLayers[len(layerPaths)-1-i] = path
+	}
+	lowerDir := strings.Join(reversedLayers, ":")
+
+	// Build mount options
+	data := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workDir)
+
+	// Mount the overlay
+	if err := unix.Mount("overlay", mergedDir, "overlay", 0, data); err != nil {
+		return "", fmt.Errorf("failed to mount overlay: %w", err)
+	}
+
+	return mergedDir, nil
+}
+
+// TeardownOverlayFS unmounts the OverlayFS for a container.
+func TeardownOverlayFS(containerID string) error {
+	mergedDir := paths.ContainerMergedDir(containerID)
+
+	// Check if it's actually mounted
+	if _, err := os.Stat(mergedDir); os.IsNotExist(err) {
+		return nil // Nothing to unmount
+	}
+
+	// Try normal unmount first
+	if err := unix.Unmount(mergedDir, 0); err != nil {
+		// Try lazy unmount if normal unmount fails (e.g., busy)
+		if err := unix.Unmount(mergedDir, unix.MNT_DETACH); err != nil {
+			// It might not be mounted, which is fine
+			return nil
+		}
+	}
+
+	return nil
+}
+
+// CleanupContainer tears down OverlayFS and removes the container directory.
+func CleanupContainer(containerID string) error {
+	// First, teardown the overlay mount
+	if err := TeardownOverlayFS(containerID); err != nil {
+		return fmt.Errorf("failed to teardown overlay: %w", err)
+	}
+
+	// Remove the entire container directory
+	containerDir := paths.ContainerDir(containerID)
+	if err := os.RemoveAll(containerDir); err != nil {
+		return fmt.Errorf("failed to remove container directory: %w", err)
+	}
+
 	return nil
 }
 

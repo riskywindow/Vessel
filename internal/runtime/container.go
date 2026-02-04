@@ -42,6 +42,7 @@ type Runtime interface {
 type LinuxRuntime struct {
 	mu         sync.RWMutex
 	containers map[string]*containerState
+	imageStore *ImageStore
 }
 
 // containerState holds the runtime state of a container.
@@ -56,16 +57,17 @@ type containerState struct {
 
 // containerConfig is persisted to disk.
 type containerConfig struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Image     string            `json:"image"`
-	Command   []string          `json:"command"`
-	Env       []string          `json:"env"`
-	WorkDir   string            `json:"workdir"`
-	Hostname  string            `json:"hostname"`
-	RootFS    string            `json:"rootfs"`
-	CreatedAt time.Time         `json:"created_at"`
-	Resources store.ResourceLimits `json:"resources"`
+	ID          string               `json:"id"`
+	Name        string               `json:"name"`
+	Image       string               `json:"image"`
+	ImageDigest string               `json:"image_digest"` // Digest of the pulled image
+	Command     []string             `json:"command"`
+	Env         []string             `json:"env"`
+	WorkDir     string               `json:"workdir"`
+	Hostname    string               `json:"hostname"`
+	RootFS      string               `json:"rootfs"`
+	CreatedAt   time.Time            `json:"created_at"`
+	Resources   store.ResourceLimits `json:"resources"`
 }
 
 // NewLinuxRuntime creates a new Linux container runtime.
@@ -77,8 +79,15 @@ func NewLinuxRuntime() (*LinuxRuntime, error) {
 		}
 	}
 
+	// Create image store
+	imageStore, err := NewImageStore()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create image store: %w", err)
+	}
+
 	return &LinuxRuntime{
 		containers: make(map[string]*containerState),
+		imageStore: imageStore,
 	}, nil
 }
 
@@ -90,47 +99,97 @@ func (r *LinuxRuntime) CreateContainer(ctx context.Context, opts ContainerOpts) 
 	// Create container directory structure
 	containerDir := paths.ContainerDir(containerID)
 	logsDir := paths.ContainerLogsDir(containerID)
-	rootfsDir := paths.ContainerMergedDir(containerID)
 
-	for _, dir := range []string{containerDir, logsDir, rootfsDir} {
+	for _, dir := range []string{containerDir, logsDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create %s: %w", dir, err)
 		}
 	}
 
-	// Create the rootfs
-	// For now, we only support "busybox" image which creates a minimal rootfs
+	var rootfsDir string
+	var imageDigest string
+	var imageConfig *ImageConfig
+
+	// Check if this is a legacy busybox image or a real OCI image
 	if opts.Image == "busybox" || opts.Image == "" {
+		// Legacy path: create busybox rootfs directly in merged dir
+		rootfsDir = paths.ContainerMergedDir(containerID)
+		if err := os.MkdirAll(rootfsDir, 0755); err != nil {
+			os.RemoveAll(containerDir)
+			return nil, fmt.Errorf("failed to create rootfs dir: %w", err)
+		}
 		if err := CreateMinimalRootfs(rootfsDir); err != nil {
 			os.RemoveAll(containerDir)
 			return nil, fmt.Errorf("failed to create rootfs: %w", err)
 		}
 	} else {
-		// Treat image as a path to an existing rootfs
-		// In the future, this will pull OCI images
-		if _, err := os.Stat(opts.Image); err != nil {
-			os.RemoveAll(containerDir)
-			return nil, fmt.Errorf("image not found: %s", opts.Image)
+		// OCI image path: pull image and set up OverlayFS
+		// First check if image is already cached
+		metadata, err := r.imageStore.GetImageByRef(opts.Image)
+		if err != nil {
+			// Image not cached, pull it
+			digest, err := r.imageStore.PullImage(ctx, opts.Image)
+			if err != nil {
+				os.RemoveAll(containerDir)
+				return nil, fmt.Errorf("failed to pull image: %w", err)
+			}
+			imageDigest = digest
+			metadata, err = r.imageStore.GetImage(digest)
+			if err != nil {
+				os.RemoveAll(containerDir)
+				return nil, fmt.Errorf("failed to get image metadata: %w", err)
+			}
+		} else {
+			imageDigest = metadata.Digest
 		}
-		// Copy the rootfs
-		if err := copyDir(opts.Image, rootfsDir); err != nil {
+		imageConfig = &metadata.Config
+
+		// Get layer paths for OverlayFS
+		layerPaths, err := r.imageStore.GetLayerPaths(imageDigest)
+		if err != nil {
 			os.RemoveAll(containerDir)
-			return nil, fmt.Errorf("failed to copy rootfs: %w", err)
+			return nil, fmt.Errorf("failed to get layer paths: %w", err)
+		}
+
+		// Set up OverlayFS
+		rootfsDir, err = SetupOverlayFS(containerID, layerPaths)
+		if err != nil {
+			os.RemoveAll(containerDir)
+			return nil, fmt.Errorf("failed to setup overlay: %w", err)
 		}
 	}
 
-	// Default command if not specified
-	if len(opts.Command) == 0 {
-		opts.Command = []string{"/bin/sh"}
+	// Merge command: user command overrides image CMD
+	command := opts.Command
+	if len(command) == 0 && imageConfig != nil {
+		// Use image's ENTRYPOINT + CMD
+		if len(imageConfig.Entrypoint) > 0 {
+			command = append(imageConfig.Entrypoint, imageConfig.Cmd...)
+		} else if len(imageConfig.Cmd) > 0 {
+			command = imageConfig.Cmd
+		}
+	}
+	if len(command) == 0 {
+		command = []string{"/bin/sh"}
 	}
 
-	// Default environment
-	if len(opts.Env) == 0 {
-		opts.Env = []string{
-			"PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin",
-			"HOME=/root",
-			"TERM=xterm",
-		}
+	// Merge environment: image env + user env (user overrides)
+	env := []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=/root",
+		"TERM=xterm",
+	}
+	if imageConfig != nil && len(imageConfig.Env) > 0 {
+		env = append(env, imageConfig.Env...)
+	}
+	if len(opts.Env) > 0 {
+		env = append(env, opts.Env...)
+	}
+
+	// Working directory: user overrides image
+	workDir := opts.WorkDir
+	if workDir == "" && imageConfig != nil && imageConfig.WorkingDir != "" {
+		workDir = imageConfig.WorkingDir
 	}
 
 	// Generate hostname from container ID
@@ -141,27 +200,28 @@ func (r *LinuxRuntime) CreateContainer(ctx context.Context, opts ContainerOpts) 
 
 	// Create container config
 	config := &containerConfig{
-		ID:        containerID,
-		Name:      opts.Name,
-		Image:     opts.Image,
-		Command:   opts.Command,
-		Env:       opts.Env,
-		WorkDir:   opts.WorkDir,
-		Hostname:  hostname,
-		RootFS:    rootfsDir,
-		CreatedAt: time.Now(),
-		Resources: opts.Resources,
+		ID:          containerID,
+		Name:        opts.Name,
+		Image:       opts.Image,
+		ImageDigest: imageDigest,
+		Command:     command,
+		Env:         env,
+		WorkDir:     workDir,
+		Hostname:    hostname,
+		RootFS:      rootfsDir,
+		CreatedAt:   time.Now(),
+		Resources:   opts.Resources,
 	}
 
 	// Save config to disk
 	configPath := paths.ContainerConfigPath(containerID)
 	configData, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		os.RemoveAll(containerDir)
+		CleanupContainer(containerID)
 		return nil, fmt.Errorf("failed to marshal config: %w", err)
 	}
 	if err := os.WriteFile(configPath, configData, 0644); err != nil {
-		os.RemoveAll(containerDir)
+		CleanupContainer(containerID)
 		return nil, fmt.Errorf("failed to write config: %w", err)
 	}
 
@@ -305,10 +365,9 @@ func (r *LinuxRuntime) RemoveContainer(ctx context.Context, containerID string) 
 	}
 	r.mu.Unlock()
 
-	// Remove container directory
-	containerDir := paths.ContainerDir(containerID)
-	if err := os.RemoveAll(containerDir); err != nil {
-		return fmt.Errorf("failed to remove container directory: %w", err)
+	// Clean up container (tears down OverlayFS and removes directory)
+	if err := CleanupContainer(containerID); err != nil {
+		return fmt.Errorf("failed to cleanup container: %w", err)
 	}
 
 	return nil
@@ -390,9 +449,14 @@ func (f *followReader) Close() error {
 }
 
 // PullImage pulls an OCI image from a registry.
-// TODO: Implement in next session.
 func (r *LinuxRuntime) PullImage(ctx context.Context, ref string) error {
-	return fmt.Errorf("not yet implemented")
+	_, err := r.imageStore.PullImage(ctx, ref)
+	return err
+}
+
+// GetImageStore returns the runtime's image store.
+func (r *LinuxRuntime) GetImageStore() *ImageStore {
+	return r.imageStore
 }
 
 // ExecInContainer executes a command in a running container.
