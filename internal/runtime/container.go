@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,6 +16,46 @@ import (
 	"github.com/vessel/vessel/internal/store"
 	"golang.org/x/sys/unix"
 )
+
+// State transition errors
+var (
+	ErrContainerNotFound     = fmt.Errorf("container not found")
+	ErrContainerNotRunning   = fmt.Errorf("container not running")
+	ErrContainerAlreadyRunning = fmt.Errorf("container already running")
+	ErrInvalidStateTransition = fmt.Errorf("invalid state transition")
+)
+
+// validTransitions defines allowed state transitions.
+// Key is current state, value is set of allowed target states.
+var validTransitions = map[store.ContainerState]map[store.ContainerState]bool{
+	store.ContainerStateCreated: {
+		store.ContainerStateRunning:  true,
+		store.ContainerStateRemoving: true,
+	},
+	store.ContainerStateRunning: {
+		store.ContainerStateStopped:  true,
+		store.ContainerStateFailed:   true,
+		store.ContainerStateRemoving: true,
+	},
+	store.ContainerStateStopped: {
+		store.ContainerStateRunning:  true, // Allow restart
+		store.ContainerStateRemoving: true,
+	},
+	store.ContainerStateFailed: {
+		store.ContainerStateRemoving: true,
+	},
+	store.ContainerStateRemoving: {
+		// Terminal state - no transitions allowed
+	},
+}
+
+// canTransition checks if a state transition is valid.
+func canTransition(from, to store.ContainerState) bool {
+	if allowed, ok := validTransitions[from]; ok {
+		return allowed[to]
+	}
+	return false
+}
 
 // ContainerOpts contains options for creating a container.
 type ContainerOpts struct {
@@ -52,7 +93,8 @@ type containerState struct {
 	waitCh    chan struct{} // closed when process exits
 	exitCode  int
 	exitError error
-	started   bool // true if container has been started at least once
+	started   bool                 // true if container has been started at least once
+	state     store.ContainerState // current state
 }
 
 // containerConfig is persisted to disk.
@@ -93,6 +135,11 @@ func NewLinuxRuntime() (*LinuxRuntime, error) {
 
 // CreateContainer creates a new container without starting it.
 func (r *LinuxRuntime) CreateContainer(ctx context.Context, opts ContainerOpts) (*store.Container, error) {
+	// Validate and set defaults for resource limits
+	if err := ValidateResourceLimits(&opts.Resources); err != nil {
+		return nil, fmt.Errorf("invalid resource limits: %w", err)
+	}
+
 	// Generate container ID
 	containerID := generateContainerID()
 
@@ -230,8 +277,11 @@ func (r *LinuxRuntime) CreateContainer(ctx context.Context, opts ContainerOpts) 
 	r.containers[containerID] = &containerState{
 		config: config,
 		waitCh: make(chan struct{}),
+		state:  store.ContainerStateCreated,
 	}
 	r.mu.Unlock()
+
+	slog.Info("container created", "id", containerID[:12], "image", opts.Image)
 
 	// Return container info
 	return &store.Container{
@@ -252,18 +302,34 @@ func (r *LinuxRuntime) StartContainer(ctx context.Context, containerID string) e
 		config, err := r.loadContainerConfig(containerID)
 		if err != nil {
 			r.mu.Unlock()
-			return fmt.Errorf("container not found: %s", containerID)
+			return fmt.Errorf("%w: %s", ErrContainerNotFound, containerID)
 		}
 		state = &containerState{
 			config: config,
 			waitCh: make(chan struct{}),
+			state:  store.ContainerStateCreated,
 		}
 		r.containers[containerID] = state
+	}
+
+	// Validate state transition
+	if state.state == store.ContainerStateRunning {
+		r.mu.Unlock()
+		return ErrContainerAlreadyRunning
+	}
+	if !canTransition(state.state, store.ContainerStateRunning) {
+		r.mu.Unlock()
+		return fmt.Errorf("%w: cannot start container in state %s", ErrInvalidStateTransition, state.state)
 	}
 	r.mu.Unlock()
 
 	if state.process != nil {
-		return fmt.Errorf("container already running")
+		return ErrContainerAlreadyRunning
+	}
+
+	// Create cgroup BEFORE starting the process
+	if err := CreateCgroup(containerID, state.config.Resources); err != nil {
+		return fmt.Errorf("failed to create cgroup: %w", err)
 	}
 
 	// Open log files
@@ -272,12 +338,14 @@ func (r *LinuxRuntime) StartContainer(ctx context.Context, containerID string) e
 
 	stdout, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
+		RemoveCgroup(containerID)
 		return fmt.Errorf("failed to open stdout log: %w", err)
 	}
 
 	stderr, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		stdout.Close()
+		RemoveCgroup(containerID)
 		return fmt.Errorf("failed to open stderr log: %w", err)
 	}
 
@@ -295,14 +363,29 @@ func (r *LinuxRuntime) StartContainer(ctx context.Context, containerID string) e
 	if err != nil {
 		stdout.Close()
 		stderr.Close()
+		RemoveCgroup(containerID)
 		return fmt.Errorf("failed to create namespaced process: %w", err)
 	}
 
+	// Add the child process to the cgroup immediately after starting
+	if err := AddProcessToCgroup(containerID, process.Pid); err != nil {
+		// Kill the process if we can't add it to the cgroup
+		process.Kill()
+		stdout.Close()
+		stderr.Close()
+		RemoveCgroup(containerID)
+		return fmt.Errorf("failed to add process to cgroup: %w", err)
+	}
+
 	r.mu.Lock()
+	oldState := state.state
 	state.process = process
 	state.started = true
+	state.state = store.ContainerStateRunning
 	state.waitCh = make(chan struct{})
 	r.mu.Unlock()
+
+	slog.Info("container state changed", "id", containerID[:12], "from", oldState, "to", store.ContainerStateRunning)
 
 	// Start goroutine to wait for process exit
 	go r.waitForExit(containerID, process, stdout, stderr)
@@ -317,17 +400,22 @@ func (r *LinuxRuntime) StopContainer(ctx context.Context, containerID string, gr
 	r.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("container not found: %s", containerID)
+		return fmt.Errorf("%w: %s", ErrContainerNotFound, containerID)
 	}
 
 	if state.process == nil {
-		return nil // Already stopped
+		// Already stopped, just clean up cgroup if it exists
+		RemoveCgroup(containerID)
+		return nil
 	}
+
+	slog.Info("stopping container", "id", containerID[:12])
 
 	// Send SIGTERM
 	if err := state.process.Signal(unix.SIGTERM); err != nil {
 		// Process might already be dead
 		if err == os.ErrProcessDone {
+			RemoveCgroup(containerID)
 			return nil
 		}
 	}
@@ -335,11 +423,15 @@ func (r *LinuxRuntime) StopContainer(ctx context.Context, containerID string, gr
 	// Wait for graceful shutdown or timeout
 	select {
 	case <-state.waitCh:
+		// Process exited, clean up cgroup
+		RemoveCgroup(containerID)
 		return nil
 	case <-time.After(gracePeriod):
 		// Force kill with SIGKILL
+		slog.Info("grace period expired, sending SIGKILL", "id", containerID[:12])
 		state.process.Signal(unix.SIGKILL)
 		<-state.waitCh
+		RemoveCgroup(containerID)
 		return nil
 	case <-ctx.Done():
 		// Context cancelled, force kill
@@ -364,6 +456,9 @@ func (r *LinuxRuntime) RemoveContainer(ctx context.Context, containerID string) 
 		delete(r.containers, containerID)
 	}
 	r.mu.Unlock()
+
+	// Clean up cgroup (may already be removed by StopContainer, that's OK)
+	RemoveCgroup(containerID)
 
 	// Clean up container (tears down OverlayFS and removes directory)
 	if err := CleanupContainer(containerID); err != nil {
@@ -466,9 +561,20 @@ func (r *LinuxRuntime) ExecInContainer(ctx context.Context, containerID string, 
 }
 
 // ContainerStats returns resource usage statistics for a container.
-// TODO: Implement in future session.
 func (r *LinuxRuntime) ContainerStats(ctx context.Context, containerID string) (*store.MetricPoint, error) {
-	return nil, fmt.Errorf("not yet implemented")
+	r.mu.RLock()
+	state, ok := r.containers[containerID]
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("container not found: %s", containerID)
+	}
+
+	if state.process == nil {
+		return nil, fmt.Errorf("container not running: %s", containerID)
+	}
+
+	return GetCgroupStats(containerID)
 }
 
 // waitForExit waits for a container process to exit and updates state.
@@ -477,18 +583,33 @@ func (r *LinuxRuntime) waitForExit(containerID string, process *os.Process, stdo
 	defer stderr.Close()
 
 	// Wait for process to exit
-	state, err := process.Wait()
+	procState, err := process.Wait()
 
 	r.mu.Lock()
 	if cs, ok := r.containers[containerID]; ok {
-		if state != nil {
-			cs.exitCode = state.ExitCode()
+		oldState := cs.state
+		if procState != nil {
+			cs.exitCode = procState.ExitCode()
+			// Determine new state based on exit code
+			if cs.exitCode == 0 {
+				cs.state = store.ContainerStateStopped
+			} else {
+				cs.state = store.ContainerStateFailed
+			}
+		} else {
+			cs.state = store.ContainerStateFailed
 		}
 		cs.exitError = err
 		cs.process = nil
 		close(cs.waitCh)
+
+		slog.Info("container state changed", "id", containerID[:12], "from", oldState, "to", cs.state, "exitCode", cs.exitCode)
 	}
 	r.mu.Unlock()
+
+	// Clean up cgroup after process exits
+	// This handles the case where the process exits on its own (not via StopContainer)
+	RemoveCgroup(containerID)
 }
 
 // loadContainerConfig loads container configuration from disk.
@@ -519,9 +640,15 @@ func (r *LinuxRuntime) GetContainerState(containerID string) (store.ContainerSta
 		if _, err := os.Stat(configPath); err == nil {
 			return store.ContainerStateCreated, nil
 		}
-		return "", fmt.Errorf("container not found: %s", containerID)
+		return "", fmt.Errorf("%w: %s", ErrContainerNotFound, containerID)
 	}
 
+	// Use the tracked state
+	if state.state != "" {
+		return state.state, nil
+	}
+
+	// Fallback for backward compatibility
 	if state.process != nil {
 		return store.ContainerStateRunning, nil
 	}

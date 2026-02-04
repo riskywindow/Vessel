@@ -85,6 +85,16 @@ func ContainerInit() error {
 		return fmt.Errorf("failed to find executable %s: %w", config.Command[0], err)
 	}
 
+	// Drop capabilities (keep only a safe subset)
+	if err := DropCapabilities(); err != nil {
+		return fmt.Errorf("failed to drop capabilities: %w", err)
+	}
+
+	// Apply seccomp filter (block dangerous syscalls)
+	if err := ApplySeccompFilter(); err != nil {
+		return fmt.Errorf("failed to apply seccomp filter: %w", err)
+	}
+
 	// Execute the container command (replaces this process)
 	if err := unix.Exec(execPath, config.Command, config.Env); err != nil {
 		return fmt.Errorf("failed to exec %s: %w", config.Command[0], err)

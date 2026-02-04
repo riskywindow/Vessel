@@ -6,11 +6,15 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vessel/vessel/internal/runtime"
+	"github.com/vessel/vessel/internal/store"
 )
 
 var (
@@ -18,6 +22,9 @@ var (
 	runEnv     []string
 	runWorkDir string
 	runRm      bool
+	runMemory  string
+	runCPU     float64
+	runPids    int64
 )
 
 var runCmd = &cobra.Command{
@@ -31,7 +38,12 @@ Examples:
   vessel run alpine:latest -- echo hello
   vessel run --name mycontainer alpine:latest -- sh -c "echo hello"
   vessel run --rm --env FOO=bar alpine:latest -- sh -c 'echo $FOO'
-  vessel run nginx:alpine`,
+  vessel run nginx:alpine
+
+  # Resource limits
+  vessel run --memory 128MB alpine:latest -- sh -c 'echo hello'
+  vessel run --cpu 0.5 alpine:latest -- sh -c 'while true; do :; done'
+  vessel run --pids 10 alpine:latest -- sh -c 'ps aux'`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runContainer,
 }
@@ -41,6 +53,9 @@ func init() {
 	runCmd.Flags().StringArrayVarP(&runEnv, "env", "e", nil, "environment variables (KEY=VALUE)")
 	runCmd.Flags().StringVarP(&runWorkDir, "workdir", "w", "", "working directory inside container")
 	runCmd.Flags().BoolVar(&runRm, "rm", false, "automatically remove container when it exits")
+	runCmd.Flags().StringVarP(&runMemory, "memory", "m", "", "memory limit (e.g., 128MB, 1GB)")
+	runCmd.Flags().Float64Var(&runCPU, "cpu", 0, "CPU limit (e.g., 0.5 for 50% of one core, 2.0 for two cores)")
+	runCmd.Flags().Int64Var(&runPids, "pids", 0, "maximum number of processes")
 
 	rootCmd.AddCommand(runCmd)
 }
@@ -83,14 +98,34 @@ func runContainer(cmd *cobra.Command, args []string) error {
 	}
 	env = append(env, runEnv...)
 
+	// Parse resource limits
+	resources := store.ResourceLimits{}
+	if runMemory != "" {
+		memBytes, err := parseMemoryLimit(runMemory)
+		if err != nil {
+			return fmt.Errorf("invalid memory limit: %w", err)
+		}
+		resources.MemoryMax = memBytes
+	}
+	if runCPU > 0 {
+		// Convert CPU percentage to quota/period
+		// CPU limit of 0.5 means 50000 microseconds per 100000 microseconds period
+		resources.CPUPeriod = 100000 // 100ms
+		resources.CPUQuota = int64(runCPU * 100000)
+	}
+	if runPids > 0 {
+		resources.PidsMax = runPids
+	}
+
 	// Create container (this pulls the image if needed)
 	fmt.Printf("Creating container with image '%s'...\n", image)
 	container, err := rt.CreateContainer(ctx, runtime.ContainerOpts{
-		Name:    runName,
-		Image:   image,
-		Command: runCommand,
-		Env:     env,
-		WorkDir: runWorkDir,
+		Name:      runName,
+		Image:     image,
+		Command:   runCommand,
+		Env:       env,
+		WorkDir:   runWorkDir,
+		Resources: resources,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create container: %w", err)
@@ -145,4 +180,44 @@ func runContainer(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nContainer stopped.\n")
 
 	return nil
+}
+
+// parseMemoryLimit parses a memory limit string like "128MB" or "1GB" into bytes.
+func parseMemoryLimit(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+
+	// Match number followed by optional unit
+	re := regexp.MustCompile(`^(\d+(?:\.\d+)?)\s*(B|K|KB|KIB|M|MB|MIB|G|GB|GIB|T|TB|TIB)?$`)
+	matches := re.FindStringSubmatch(s)
+	if matches == nil {
+		return 0, fmt.Errorf("invalid format: %s (expected e.g., 128MB, 1GB, 512K)", s)
+	}
+
+	value, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number: %s", matches[1])
+	}
+
+	unit := matches[2]
+	if unit == "" {
+		unit = "B"
+	}
+
+	var multiplier float64
+	switch unit {
+	case "B":
+		multiplier = 1
+	case "K", "KB", "KIB":
+		multiplier = 1024
+	case "M", "MB", "MIB":
+		multiplier = 1024 * 1024
+	case "G", "GB", "GIB":
+		multiplier = 1024 * 1024 * 1024
+	case "T", "TB", "TIB":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	default:
+		return 0, fmt.Errorf("unknown unit: %s", unit)
+	}
+
+	return int64(value * multiplier), nil
 }
