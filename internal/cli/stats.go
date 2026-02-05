@@ -1,82 +1,99 @@
 package cli
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
-	"os"
-	"time"
+	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/vessel/vessel/internal/runtime"
+	"github.com/vessel/vessel/internal/daemon"
+	"github.com/vessel/vessel/internal/store"
 )
 
 var statsCmd = &cobra.Command{
-	Use:   "stats CONTAINER",
-	Short: "Show resource usage statistics for a container",
-	Long: `Show resource usage statistics for a running container.
+	Use:   "stats <app>",
+	Short: "Show resource usage statistics",
+	Long: `Show resource usage statistics for an application's containers.
 
 Displays CPU, memory, and process count metrics from cgroups v2.
 
 Examples:
-  vessel stats mycontainer     # Stats for container named 'mycontainer'
-  vessel stats abc123def456    # Stats for container by ID`,
+  vessel stats myapp           # Stats for all containers of an app`,
 	Args: cobra.ExactArgs(1),
-	RunE: showContainerStats,
+	RunE: runStats,
 }
 
 func init() {
-	rootCmd.AddCommand(statsCmd)
+	// statsCmd is registered in root.go
 }
 
-func showContainerStats(cmd *cobra.Command, args []string) error {
-	containerID := args[0]
+func runStats(cmd *cobra.Command, args []string) error {
+	appName := args[0]
 
-	// Check for root privileges
-	if os.Getuid() != 0 {
-		return fmt.Errorf("vessel stats requires root privileges")
+	client := daemon.NewClient("")
+
+	// Get containers for the app
+	var containers []*store.Container
+	if err := client.Call("containers.list", map[string]string{"app_name": appName}, &containers); err != nil {
+		return fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	// Create runtime
-	rt, err := runtime.NewLinuxRuntime()
-	if err != nil {
-		return fmt.Errorf("failed to create runtime: %w", err)
+	if len(containers) == 0 {
+		return fmt.Errorf("no containers found for app '%s'", appName)
 	}
 
-	ctx := context.Background()
-
-	// Get container stats
-	stats, err := rt.ContainerStats(ctx, containerID)
-	if err != nil {
-		return fmt.Errorf("failed to get stats: %w", err)
+	if jsonOutput {
+		var results []map[string]interface{}
+		for _, c := range containers {
+			if c.State != store.ContainerStateRunning {
+				continue
+			}
+			var stats store.MetricPoint
+			if err := client.Call("containers.stats", map[string]string{"container_id": c.ID}, &stats); err != nil {
+				continue
+			}
+			results = append(results, map[string]interface{}{
+				"container_id": c.ID[:8],
+				"stats":        stats,
+			})
+		}
+		data, _ := json.MarshalIndent(results, "", "  ")
+		fmt.Println(string(data))
+		return nil
 	}
 
-	// Display stats
-	fmt.Printf("Container: %s\n", containerID)
-	fmt.Printf("Timestamp: %s\n\n", stats.Timestamp.Format(time.RFC3339))
+	// Table header
+	fmt.Printf("%-12s %-8s %-20s %-8s\n", "CONTAINER", "CPU", "MEMORY", "PIDS")
+	fmt.Println(strings.Repeat("-", 52))
 
-	// CPU
-	fmt.Printf("CPU:\n")
-	fmt.Printf("  Usage: %.2f seconds (cumulative)\n", stats.CPUPercent)
+	for _, c := range containers {
+		if c.State != store.ContainerStateRunning {
+			continue
+		}
 
-	// Memory
-	fmt.Printf("\nMemory:\n")
-	fmt.Printf("  Current: %s\n", formatBytes(stats.MemoryBytes))
-	if stats.MemoryLimit > 0 {
-		fmt.Printf("  Limit:   %s\n", formatBytes(stats.MemoryLimit))
-		pct := float64(stats.MemoryBytes) / float64(stats.MemoryLimit) * 100
-		fmt.Printf("  Usage:   %.1f%%\n", pct)
-	}
+		var stats store.MetricPoint
+		if err := client.Call("containers.stats", map[string]string{"container_id": c.ID}, &stats); err != nil {
+			fmt.Printf("%-12s %-8s %-20s %-8s\n", c.ID[:8], "—", "—", "—")
+			continue
+		}
 
-	// PIDs
-	fmt.Printf("\nProcesses:\n")
-	fmt.Printf("  Count: %d\n", stats.PidsCount)
+		cpuStr := fmt.Sprintf("%.1f%%", stats.CPUPercent)
+		memStr := formatMemory(stats.MemoryBytes, stats.MemoryLimit)
+		pidsStr := fmt.Sprintf("%d", stats.PidsCount)
+		if c.Resources.PidsMax > 0 {
+			pidsStr = fmt.Sprintf("%d/%d", stats.PidsCount, c.Resources.PidsMax)
+		}
 
-	// Network (if available)
-	if stats.NetworkRxBytes > 0 || stats.NetworkTxBytes > 0 {
-		fmt.Printf("\nNetwork:\n")
-		fmt.Printf("  RX: %s\n", formatBytes(stats.NetworkRxBytes))
-		fmt.Printf("  TX: %s\n", formatBytes(stats.NetworkTxBytes))
+		fmt.Printf("%-12s %-8s %-20s %-8s\n", c.ID[:8], cpuStr, memStr, pidsStr)
 	}
 
 	return nil
+}
+
+func formatMemory(current, limit int64) string {
+	currentStr := formatBytes(current)
+	if limit > 0 {
+		return fmt.Sprintf("%s/%s", currentStr, formatBytes(limit))
+	}
+	return currentStr
 }

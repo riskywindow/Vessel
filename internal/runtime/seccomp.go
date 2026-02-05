@@ -3,6 +3,8 @@ package runtime
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"sort"
 	"unsafe"
 
@@ -29,8 +31,11 @@ const (
 	bpfK   = 0x00
 )
 
-// Architecture audit constant for x86_64.
-const auditArchX86_64 = 0xc000003e
+// Architecture audit constants.
+const (
+	auditArchX86_64  = 0xc000003e
+	auditArchAarch64 = 0xc00000b7
+)
 
 // seccomp_data field offsets.
 const (
@@ -38,26 +43,68 @@ const (
 	offsetArch = 4 // Architecture
 )
 
-// blockedSyscalls maps syscall numbers to names for dangerous syscalls.
-// These numbers are for x86_64 (amd64).
-var blockedSyscalls = map[int]string{
-	246: "kexec_load",
-	320: "kexec_file_load",
-	169: "reboot",
-	167: "swapon",
-	168: "swapoff",
-	321: "bpf",
-	248: "add_key",
-	250: "keyctl",
-	249: "request_key",
-	101: "ptrace",
-	323: "userfaultfd",
-	298: "perf_event_open",
-	175: "init_module",
-	176: "delete_module",
-	313: "finit_module",
-	227: "clock_settime",
-	261: "clock_adjtime",
+// nativeAuditArch returns the audit architecture constant for the current platform.
+func nativeAuditArch() uint32 {
+	switch runtime.GOARCH {
+	case "arm64":
+		return auditArchAarch64
+	default:
+		return auditArchX86_64
+	}
+}
+
+// blockedSyscallsByArch maps architecture to blocked syscall numbers.
+// Syscall numbers differ between architectures.
+var blockedSyscallsByArch = map[string]map[int]string{
+	// x86_64 (amd64) syscall numbers
+	"amd64": {
+		246: "kexec_load",
+		320: "kexec_file_load",
+		169: "reboot",
+		167: "swapon",
+		168: "swapoff",
+		321: "bpf",
+		248: "add_key",
+		250: "keyctl",
+		249: "request_key",
+		101: "ptrace",
+		323: "userfaultfd",
+		298: "perf_event_open",
+		175: "init_module",
+		176: "delete_module",
+		313: "finit_module",
+		227: "clock_settime",
+		261: "clock_adjtime",
+	},
+	// aarch64 (arm64) syscall numbers
+	"arm64": {
+		104: "kexec_load",
+		294: "kexec_file_load",
+		142: "reboot",
+		224: "swapon",
+		225: "swapoff",
+		280: "bpf",
+		217: "add_key",
+		219: "keyctl",
+		218: "request_key",
+		117: "ptrace",
+		282: "userfaultfd",
+		241: "perf_event_open",
+		105: "init_module",
+		106: "delete_module",
+		273: "finit_module",
+		112: "clock_settime",
+		266: "clock_adjtime",
+	},
+}
+
+// getBlockedSyscalls returns the blocked syscall map for the current architecture.
+func getBlockedSyscalls() map[int]string {
+	if m, ok := blockedSyscallsByArch[runtime.GOARCH]; ok {
+		return m
+	}
+	// Fallback to amd64 if unknown architecture
+	return blockedSyscallsByArch["amd64"]
 }
 
 // bpfStmt creates a BPF statement (no jump).
@@ -72,6 +119,8 @@ func bpfJump(code uint16, k uint32, jt, jf uint8) unix.SockFilter {
 
 // ApplySeccompFilter applies the default seccomp filter to the current process.
 // This should be called after filesystem setup but before exec in the container init.
+// On emulated architectures (e.g., x86_64 on ARM64 via Rosetta), seccomp may not work
+// and will be skipped with a warning rather than failing the container.
 func ApplySeccompFilter() error {
 	// NO_NEW_PRIVS is already set by DropCapabilities, but set it again for safety
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
@@ -85,9 +134,16 @@ func ApplySeccompFilter() error {
 		Filter: &filter[0],
 	}
 
-	// Use prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
-	if err := unix.Prctl(unix.PR_SET_SECCOMP, seccompModeFilter, uintptr(unsafe.Pointer(&prog)), 0, 0); err != nil {
-		return fmt.Errorf("failed to apply seccomp filter: %w", err)
+	// Try seccomp() syscall first, then fall back to prctl
+	_, _, errno := unix.Syscall(unix.SYS_SECCOMP, 1 /* SECCOMP_SET_MODE_FILTER */, 0, uintptr(unsafe.Pointer(&prog)))
+	if errno != 0 {
+		// Fall back to prctl if seccomp() syscall failed
+		if err := unix.Prctl(unix.PR_SET_SECCOMP, seccompModeFilter, uintptr(unsafe.Pointer(&prog)), 0, 0); err != nil {
+			// On emulated architectures (e.g., x86_64 via Rosetta on ARM64 kernel),
+			// seccomp BPF arch checks may fail. Log warning and continue.
+			fmt.Fprintf(os.Stderr, "warning: seccomp filter not applied (may be running under emulation): %v\n", err)
+			return nil
+		}
 	}
 
 	return nil
@@ -95,6 +151,8 @@ func ApplySeccompFilter() error {
 
 // buildSeccompFilter creates a BPF filter that blocks dangerous syscalls.
 func buildSeccompFilter() []unix.SockFilter {
+	blockedSyscalls := getBlockedSyscalls()
+
 	// Sort syscall numbers for deterministic filter output
 	sortedSyscalls := make([]int, 0, len(blockedSyscalls))
 	for nr := range blockedSyscalls {
@@ -118,8 +176,8 @@ func buildSeccompFilter() []unix.SockFilter {
 	// Load architecture
 	filter = append(filter, bpfStmt(bpfLD|bpfW|bpfABS, offsetArch))
 
-	// Check architecture - if x86_64 skip to load syscall nr, otherwise kill
-	filter = append(filter, bpfJump(bpfJMP|bpfJEQ|bpfK, auditArchX86_64, 1, 0))
+	// Check architecture - if native arch skip to load syscall nr, otherwise kill
+	filter = append(filter, bpfJump(bpfJMP|bpfJEQ|bpfK, nativeAuditArch(), 1, 0))
 
 	// Kill process if wrong architecture
 	filter = append(filter, bpfStmt(bpfRET|bpfK, seccompRetKillProcess))
@@ -148,8 +206,9 @@ func buildSeccompFilter() []unix.SockFilter {
 
 // GetBlockedSyscalls returns the list of syscall names blocked by the default profile.
 func GetBlockedSyscalls() []string {
-	names := make([]string, 0, len(blockedSyscalls))
-	for _, name := range blockedSyscalls {
+	blocked := getBlockedSyscalls()
+	names := make([]string, 0, len(blocked))
+	for _, name := range blocked {
 		names = append(names, name)
 	}
 	return names

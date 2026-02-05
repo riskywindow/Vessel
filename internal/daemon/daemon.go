@@ -1,4 +1,223 @@
-// Package daemon manages the daemon process.
+// Package daemon manages the Vessel daemon process.
 package daemon
 
-// TODO(vessel): Implement main daemon loop and signal handling
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/vessel/vessel/internal/manager"
+	"github.com/vessel/vessel/internal/paths"
+	"github.com/vessel/vessel/internal/runtime"
+	"github.com/vessel/vessel/internal/store"
+)
+
+// Daemon is the long-running Vessel process that manages containers.
+type Daemon struct {
+	runtime  *runtime.LinuxRuntime
+	store    store.Store
+	manager  *manager.AppManager
+	logger   *slog.Logger
+	socket   net.Listener
+	stopCh   chan struct{}
+	wg       sync.WaitGroup
+}
+
+// NewDaemon creates a new Daemon instance.
+func NewDaemon(logger *slog.Logger) (*Daemon, error) {
+	// Ensure directories exist
+	for _, dir := range []string{paths.StateDir, paths.RunDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+	}
+
+	// Initialize the store
+	st, err := store.Open(paths.DatabasePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open store: %w", err)
+	}
+
+	// Initialize the runtime
+	rt, err := runtime.NewLinuxRuntime()
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("failed to create runtime: %w", err)
+	}
+
+	// Initialize the manager
+	mgr := manager.NewAppManager(rt, st, logger)
+
+	return &Daemon{
+		runtime: rt,
+		store:   st,
+		manager: mgr,
+		logger:  logger,
+		stopCh:  make(chan struct{}),
+	}, nil
+}
+
+// GetManager returns the daemon's app manager.
+func (d *Daemon) GetManager() *manager.AppManager {
+	return d.manager
+}
+
+// GetRuntime returns the daemon's runtime.
+func (d *Daemon) GetRuntime() *runtime.LinuxRuntime {
+	return d.runtime
+}
+
+// Start starts the daemon. It blocks until the context is cancelled or Stop is called.
+func (d *Daemon) Start(ctx context.Context) error {
+	d.logger.Info("starting vessel daemon")
+
+	// Remove stale socket file
+	os.Remove(paths.SocketPath)
+
+	// Create Unix socket listener
+	listener, err := net.Listen("unix", paths.SocketPath)
+	if err != nil {
+		return fmt.Errorf("failed to listen on socket %s: %w", paths.SocketPath, err)
+	}
+	d.socket = listener
+
+	// Set socket permissions
+	if err := os.Chmod(paths.SocketPath, 0660); err != nil {
+		d.logger.Warn("failed to set socket permissions", "error", err)
+	}
+
+	d.logger.Info("listening on socket", "path", paths.SocketPath)
+
+	// Start the reconciliation loop
+	reconcileCtx, reconcileCancel := context.WithCancel(ctx)
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.manager.GetReconciler().Run(reconcileCtx)
+	}()
+
+	// Start accepting connections on the socket
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.acceptConnections(ctx)
+	}()
+
+	// Set up signal handling
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	d.logger.Info("vessel daemon started")
+
+	// Block until shutdown signal
+	select {
+	case sig := <-sigCh:
+		d.logger.Info("received signal", "signal", sig)
+	case <-ctx.Done():
+		d.logger.Info("context cancelled")
+	case <-d.stopCh:
+		d.logger.Info("stop requested")
+	}
+
+	// Initiate graceful shutdown
+	signal.Stop(sigCh)
+	reconcileCancel()
+
+	return d.shutdown()
+}
+
+// Stop signals the daemon to shut down.
+func (d *Daemon) Stop() error {
+	select {
+	case <-d.stopCh:
+		// Already stopping
+	default:
+		close(d.stopCh)
+	}
+	return nil
+}
+
+// shutdown performs graceful shutdown of all daemon components.
+func (d *Daemon) shutdown() error {
+	d.logger.Info("shutting down vessel daemon")
+
+	// Stop accepting new connections
+	if d.socket != nil {
+		d.socket.Close()
+	}
+
+	// Wait for in-flight operations to complete (with timeout)
+	done := make(chan struct{})
+	go func() {
+		d.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		d.logger.Info("all goroutines stopped")
+	case <-time.After(30 * time.Second):
+		d.logger.Warn("shutdown timed out, forcing exit")
+	}
+
+	// Close the store
+	if d.store != nil {
+		if err := d.store.Close(); err != nil {
+			d.logger.Error("failed to close store", "error", err)
+		}
+	}
+
+	// Remove socket file
+	os.Remove(paths.SocketPath)
+
+	d.logger.Info("vessel daemon stopped")
+	return nil
+}
+
+// acceptConnections handles incoming connections on the Unix socket.
+func (d *Daemon) acceptConnections(ctx context.Context) {
+	for {
+		conn, err := d.socket.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.stopCh:
+				return
+			default:
+				d.logger.Error("failed to accept connection", "error", err)
+				continue
+			}
+		}
+
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.handleConnection(ctx, conn)
+		}()
+	}
+}
+
+// handleConnection processes a single client connection.
+func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+
+	handler := NewHandler(d.manager, d.runtime, d.logger)
+	handler.Handle(ctx, conn)
+}
+
+// IsRunning checks if a daemon is currently running by attempting to connect to the socket.
+func IsRunning() bool {
+	conn, err := net.DialTimeout("unix", paths.SocketPath, 1*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}

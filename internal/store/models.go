@@ -64,6 +64,11 @@ const (
 type App struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
+	Image     string    `json:"image"`               // OCI image reference
+	Command   []string  `json:"command,omitempty"`    // Override image command
+	Env       map[string]string `json:"env,omitempty"` // Environment variables
+	Instances int       `json:"instances"`            // Desired instance count
+	Resources ResourceLimits `json:"resources"`       // Resource limits per container
 	State     AppState  `json:"state"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
