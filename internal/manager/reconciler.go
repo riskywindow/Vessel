@@ -15,7 +15,7 @@ import (
 
 // Reconciler continuously ensures actual state matches desired state.
 type Reconciler struct {
-	runtime  *runtime.LinuxRuntime
+	runtime  runtime.Runtime
 	store    store.Store
 	logger   *slog.Logger
 	interval time.Duration
@@ -38,7 +38,7 @@ const (
 )
 
 // NewReconciler creates a new Reconciler.
-func NewReconciler(rt *runtime.LinuxRuntime, st store.Store, logger *slog.Logger) *Reconciler {
+func NewReconciler(rt runtime.Runtime, st store.Store, logger *slog.Logger) *Reconciler {
 	return &Reconciler{
 		runtime:  rt,
 		store:    st,

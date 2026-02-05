@@ -20,7 +20,7 @@ import (
 
 // Daemon is the long-running Vessel process that manages containers.
 type Daemon struct {
-	runtime  *runtime.LinuxRuntime
+	runtime  runtime.Runtime
 	store    store.Store
 	manager  *manager.AppManager
 	logger   *slog.Logger
@@ -69,7 +69,7 @@ func (d *Daemon) GetManager() *manager.AppManager {
 }
 
 // GetRuntime returns the daemon's runtime.
-func (d *Daemon) GetRuntime() *runtime.LinuxRuntime {
+func (d *Daemon) GetRuntime() runtime.Runtime {
 	return d.runtime
 }
 

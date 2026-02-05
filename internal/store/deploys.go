@@ -141,3 +141,55 @@ func (s *BoltStore) GetNextDeployVersion(appID string) (int, error) {
 	}
 	return latest.Version + 1, nil
 }
+
+// GetDeployByVersion returns a specific deploy by app ID and version number.
+func (s *BoltStore) GetDeployByVersion(appID string, version int) (*Deploy, error) {
+	deploys, err := s.ListDeploysByApp(appID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, d := range deploys {
+		if d.Version == version {
+			return d, nil
+		}
+	}
+
+	return nil, vessel.ErrVersionNotFound
+}
+
+// DeleteDeploy removes a deploy record by ID.
+func (s *BoltStore) DeleteDeploy(id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketDeploys)
+		if b.Get([]byte(id)) == nil {
+			return vessel.ErrVersionNotFound
+		}
+		return b.Delete([]byte(id))
+	})
+}
+
+// PruneDeployHistory removes old deploys beyond the retention limit for an app.
+func (s *BoltStore) PruneDeployHistory(appID string, keepN int) error {
+	if keepN <= 0 {
+		return nil
+	}
+
+	deploys, err := s.ListDeploysByApp(appID)
+	if err != nil {
+		return err
+	}
+
+	if len(deploys) <= keepN {
+		return nil
+	}
+
+	// deploys is sorted newest-first; prune from the end
+	for _, d := range deploys[keepN:] {
+		if err := s.DeleteDeploy(d.ID); err != nil {
+			return fmt.Errorf("failed to prune deploy %s: %w", d.ID, err)
+		}
+	}
+
+	return nil
+}

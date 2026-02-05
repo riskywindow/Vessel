@@ -38,6 +38,10 @@ type Store interface {
 	GetDeploy(id string) (*Deploy, error)
 	ListDeploysByApp(appID string) ([]*Deploy, error)
 	GetLatestDeploy(appID string) (*Deploy, error)
+	UpdateDeploy(d *Deploy) error
+	GetNextDeployVersion(appID string) (int, error)
+	GetDeployByVersion(appID string, version int) (*Deploy, error)
+	DeleteDeploy(id string) error
 
 	// Secret operations
 	SetSecret(key string, encryptedValue []byte) error

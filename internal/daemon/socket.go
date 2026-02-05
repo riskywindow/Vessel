@@ -9,6 +9,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/vessel/vessel/internal/config"
 	"github.com/vessel/vessel/internal/manager"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
@@ -35,12 +36,12 @@ type ErrorResponse struct {
 // Handler dispatches requests to the appropriate manager methods.
 type Handler struct {
 	manager *manager.AppManager
-	runtime *runtime.LinuxRuntime
+	runtime runtime.Runtime
 	logger  *slog.Logger
 }
 
 // NewHandler creates a new request handler.
-func NewHandler(mgr *manager.AppManager, rt *runtime.LinuxRuntime, logger *slog.Logger) *Handler {
+func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, logger *slog.Logger) *Handler {
 	return &Handler{
 		manager: mgr,
 		runtime: rt,
@@ -75,6 +76,12 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleRestartApp(ctx, conn, req.Params)
 	case "apps.deploy":
 		h.handleDeployApp(ctx, conn, req.Params)
+	case "apps.deploy_config":
+		h.handleDeployAppConfig(ctx, conn, req.Params)
+	case "apps.rollback":
+		h.handleRollbackApp(ctx, conn, req.Params)
+	case "apps.history":
+		h.handleDeployHistory(ctx, conn, req.Params)
 	case "containers.list":
 		h.handleListContainers(ctx, conn, req.Params)
 	case "containers.logs":
@@ -179,6 +186,53 @@ func (h *Handler) handleDeployApp(ctx context.Context, conn net.Conn, params jso
 		return
 	}
 	h.writeData(conn, deploy)
+}
+
+func (h *Handler) handleDeployAppConfig(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var appCfg config.AppConfig
+	if err := json.Unmarshal(params, &appCfg); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	deploy, err := h.manager.DeployAppFromConfig(ctx, &appCfg)
+	if err != nil {
+		h.writeError(conn, "DEPLOY_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, deploy)
+}
+
+func (h *Handler) handleRollbackApp(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		Name    string `json:"name"`
+		Version int    `json:"version"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	deploy, err := h.manager.RollbackApp(ctx, p.Name, p.Version)
+	if err != nil {
+		h.writeError(conn, "ROLLBACK_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, deploy)
+}
+
+func (h *Handler) handleDeployHistory(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	deploys, err := h.manager.GetDeployHistory(ctx, p.Name)
+	if err != nil {
+		h.writeError(conn, "HISTORY_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, deploys)
 }
 
 func (h *Handler) handleListContainers(ctx context.Context, conn net.Conn, params json.RawMessage) {

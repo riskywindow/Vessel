@@ -82,13 +82,13 @@
 - [x] Write unit tests for manager (21 tests)
 - [x] Write unit tests for daemon socket communication (10 tests)
 
-### Week 6: Zero-Downtime Deploys and Rollback
-- [ ] Implement `vessel deploy` — full flow from config to running container
-- [ ] Implement rolling deploy strategy
-- [ ] Implement blue-green deploy strategy
-- [ ] Implement deploy history tracking
-- [ ] Implement `vessel rollback`
-- [ ] Implement `vessel history`
+### Week 6: Zero-Downtime Deploys and Rollback ✅
+- [x] Implement `vessel deploy` — full flow from config to running container
+- [x] Implement rolling deploy strategy
+- [x] Implement blue-green deploy strategy
+- [x] Implement deploy history tracking
+- [x] Implement `vessel rollback`
+- [x] Implement `vessel history`
 
 ### Week 7: Environment, Secrets, and Multi-App
 - [ ] Implement environment variable injection
@@ -265,3 +265,77 @@
 
 **Next:**
 - Week 6: Implement rolling/blue-green deploy strategies, rollback, `vessel deploy`, `vessel history`
+
+### Session 6 — 2026-02-05 ✅
+**Task:** Phase 2 Week 6 — Deploy Pipeline, Rollback, History
+
+**Completed:**
+- Updated Store interface (`internal/store/db.go`):
+  - Added UpdateDeploy, GetNextDeployVersion, GetDeployByVersion, DeleteDeploy to Store interface
+- Implemented new store methods (`internal/store/deploys.go`):
+  - GetDeployByVersion, DeleteDeploy, PruneDeployHistory (retention management)
+- Added JSON tags to config types (`internal/config/types.go`):
+  - All Config/AppConfig/HealthCheckConfig/DeployConfig structs now have `json:"..."` tags
+  - Enables serialization over daemon socket protocol
+- Implemented full deploy pipeline (`internal/manager/deploy.go`, ~465 lines):
+  - DeployAppFromConfig: main entry point accepting config.AppConfig
+  - deployNewApp: first deploy — create app, pull image, start containers, health check
+  - deployRolling: rolling update — replace containers one at a time with drain timeout
+  - deployBlueGreen: blue-green — start all new, health check all, atomic swap, remove old
+  - createDeployRecord: monotonic versioning per app
+  - finishDeploy/failDeploy: deploy status management
+  - configToResourceLimits: config.ResourceConfig → store.ResourceLimits conversion
+  - Container lifecycle helpers: createAndStartManagedContainer, cleanupContainers, etc.
+- Implemented deploy-time health checking (`internal/manager/health.go`, ~190 lines):
+  - waitForHealthy: polls health check until healthy or timeout (immediate first check)
+  - HTTP health checks (GET, expect 2xx)
+  - TCP health checks (connection test)
+  - Command health checks (exec in container, check exit code)
+  - Default health check when none configured (command: true)
+  - buildHealthCheck: converts config.HealthCheckConfig → store.HealthCheck
+- Implemented rollback (`internal/manager/rollback.go`, ~100 lines):
+  - RollbackApp: find target version, validate status, redeploy with target's image
+  - Supports version=0 (previous) and explicit version number
+  - Marks new deploy with RollbackOf pointer
+  - Marks old deploy as rolled_back
+  - Validates target deploy was successful (active or rolled_back status)
+- Updated daemon socket handler (`internal/daemon/socket.go`):
+  - Added apps.deploy_config method (accepts full config.AppConfig)
+  - Added apps.rollback method (name + version)
+  - Added apps.history method (returns deploy list)
+- Implemented CLI commands:
+  - `vessel deploy` (`internal/cli/deploy.go`): parse TOML, send to daemon, show progress
+    - Supports --app, --all, --image, --strategy, --config flags
+  - `vessel rollback` (`internal/cli/rollback.go`): rollback with --version flag
+  - `vessel history` (`internal/cli/history.go`): formatted table with version, status, image, strategy, duration, notes
+- Refactored AppManager/Reconciler/Daemon to use `runtime.Runtime` interface:
+  - Changed from concrete `*runtime.LinuxRuntime` to `runtime.Runtime` interface
+  - Enables mock runtime injection for testing
+  - Updated daemon.go, socket.go, app.go, reconciler.go, health.go, deploy.go
+- Created comprehensive test suite (`internal/manager/deploy_test.go`, ~500 lines):
+  - mockRuntime: full mock implementing runtime.Runtime interface
+  - Deploy tests: new app happy path, multiple instances, health check failure, image pull failure
+  - Rolling update tests: container replacement, failure keeps old containers
+  - Blue-green tests: happy path, failure keeps old containers
+  - Versioning test: 3 sequential deploys with correct version numbers
+  - Rollback tests: previous version, specific version, no history, failed deploy, app not found
+  - Store tests: GetDeployByVersion, GetNextDeployVersion
+  - configToResourceLimits: unit tests with table-driven tests
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 5 packages pass (config, daemon, manager, runtime, store)
+- `go vet ./...` — clean
+- 18 new tests added in deploy_test.go
+- manager package total: 36 tests (was 21, now 36)
+- Overall test count: ~77 tests across all packages
+
+**Decisions:**
+- Refactored AppManager/Reconciler/Daemon to use `runtime.Runtime` interface (enables mock injection for testing)
+- Deploy-time health checks are separate from continuous health monitoring (Phase 4)
+- PruneDeployHistory keeps last 10 deploys by default
+- DeployApp backward-compat wrapper kept for existing socket handler
+- waitForHealthy does immediate first health check before waiting for ticker (faster tests)
+
+**Next:**
+- Week 7: Environment variables, encrypted secrets, multi-app deploys

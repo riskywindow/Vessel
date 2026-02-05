@@ -300,15 +300,16 @@ func TestGetDeployHistory_WithDeploys(t *testing.T) {
 	}
 }
 
-func TestRollbackApp_NotImplemented(t *testing.T) {
+func TestRollbackApp_AppNotFound(t *testing.T) {
 	st := testutil.TempStore(t)
 	mgr := &AppManager{
-		store: st,
+		store:  st,
+		logger: testLogger(),
 	}
 
-	_, err := mgr.RollbackApp(context.Background(), "myapp", 1)
+	_, err := mgr.RollbackApp(context.Background(), "nonexistent", 1)
 	if err == nil {
-		t.Fatal("expected error for unimplemented rollback")
+		t.Fatal("expected error for nonexistent app")
 	}
 }
 

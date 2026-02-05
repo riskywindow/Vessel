@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	vessel "github.com/vessel/vessel/internal"
+	"github.com/vessel/vessel/internal/config"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
 )
 
 // AppManager orchestrates application lifecycle operations.
 type AppManager struct {
-	runtime    *runtime.LinuxRuntime
+	runtime    runtime.Runtime
 	store      store.Store
 	reconciler *Reconciler
 	logger     *slog.Logger
@@ -23,7 +23,7 @@ type AppManager struct {
 }
 
 // NewAppManager creates a new AppManager.
-func NewAppManager(rt *runtime.LinuxRuntime, st store.Store, logger *slog.Logger) *AppManager {
+func NewAppManager(rt runtime.Runtime, st store.Store, logger *slog.Logger) *AppManager {
 	m := &AppManager{
 		runtime: rt,
 		store:   st,
@@ -241,128 +241,31 @@ func (m *AppManager) RestartApp(ctx context.Context, appName string) error {
 	return nil
 }
 
-// DeployApp performs a full deploy. Stubbed for now — implemented in Phase 2 Session 2.
+// DeployApp performs a deploy using simple parameters (backward compatible with daemon socket).
+// It constructs a config.AppConfig and delegates to DeployAppFromConfig.
 func (m *AppManager) DeployApp(ctx context.Context, appName string, image string, instances int, env map[string]string, resources store.ResourceLimits) (*store.Deploy, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Check if app exists, create if not
-	app, err := m.store.GetApp(appName)
-	if err != nil {
-		// Create a new app
-		app = &store.App{
-			ID:        appName, // Use name as ID for simplicity
-			Name:      appName,
-			Image:     image,
-			Instances: instances,
-			Env:       env,
-			Resources: resources,
-			State:     store.AppStateDeploying,
-		}
-		if err := m.store.CreateApp(app); err != nil {
-			return nil, fmt.Errorf("failed to create app: %w", err)
-		}
-	} else {
-		// Update existing app
-		app.Image = image
-		app.Instances = instances
-		app.Env = env
-		app.Resources = resources
-		app.State = store.AppStateDeploying
-		if err := m.store.UpdateApp(app); err != nil {
-			return nil, fmt.Errorf("failed to update app: %w", err)
-		}
+	appCfg := &config.AppConfig{
+		Name:      appName,
+		Image:     image,
+		Instances: instances,
+		Env:       env,
 	}
-
-	m.logger.Info("deploying app", "app", appName, "image", image, "instances", instances)
-
-	// Pull the image first
-	if err := m.runtime.PullImage(ctx, image); err != nil {
-		app.State = store.AppStateFailed
-		m.store.UpdateApp(app)
-		return nil, fmt.Errorf("failed to pull image: %w", err)
+	// Set resource config from store.ResourceLimits
+	if resources.CPUQuota > 0 {
+		appCfg.Resources.CPU = int(resources.CPUQuota / 1000)
 	}
-
-	// Stop and remove existing containers
-	existingContainers, _ := m.store.ListContainersByApp(app.ID)
-	for _, c := range existingContainers {
-		if c.State == store.ContainerStateRunning {
-			m.runtime.StopContainer(ctx, c.ID, 10*time.Second)
-		}
-		m.runtime.RemoveContainer(ctx, c.ID)
-		m.store.DeleteContainer(c.ID)
+	if appCfg.Resources.CPU <= 0 {
+		appCfg.Resources.CPU = 100
 	}
-
-	// Build environment list
-	envList := buildEnvList(env)
-
-	// Create and start new containers
-	var lastErr error
-	for i := 0; i < instances; i++ {
-		c, err := m.runtime.CreateContainer(ctx, runtime.ContainerOpts{
-			Name:      fmt.Sprintf("%s-%d", appName, i),
-			Image:     image,
-			Env:       envList,
-			Resources: resources,
-		})
-		if err != nil {
-			m.logger.Error("failed to create container", "app", appName, "instance", i, "error", err)
-			lastErr = err
-			continue
-		}
-		c.AppID = app.ID
-
-		if err := m.store.CreateContainer(c); err != nil {
-			m.logger.Error("failed to persist container", "container", c.ID[:12], "error", err)
-			lastErr = err
-			continue
-		}
-
-		if err := m.runtime.StartContainer(ctx, c.ID); err != nil {
-			m.logger.Error("failed to start container", "container", c.ID[:12], "error", err)
-			lastErr = err
-			continue
-		}
-
-		now := time.Now()
-		c.State = store.ContainerStateRunning
-		c.StartedAt = &now
-		if err := m.store.UpdateContainer(c); err != nil {
-			m.logger.Error("failed to update container state", "container", c.ID[:12], "error", err)
-		}
+	if resources.MemoryMax > 0 {
+		appCfg.Resources.Memory = fmt.Sprintf("%dB", resources.MemoryMax)
 	}
-
-	// Update app state
-	if lastErr != nil {
-		app.State = store.AppStateFailed
-	} else {
-		app.State = store.AppStateRunning
+	if resources.PidsMax > 0 {
+		appCfg.Resources.Pids = int(resources.PidsMax)
 	}
-	m.store.UpdateApp(app)
+	config.ApplyDefaults(&config.Config{Apps: []config.AppConfig{*appCfg}})
 
-	// Create deploy record
-	deploy := &store.Deploy{
-		ID:       fmt.Sprintf("%s-%d", appName, time.Now().UnixNano()),
-		AppID:    app.ID,
-		Image:    image,
-		Strategy: store.DeployStrategyRolling,
-		Status:   store.DeployStatusActive,
-	}
-	if lastErr != nil {
-		deploy.Status = store.DeployStatusFailed
-		deploy.Error = lastErr.Error()
-	}
-	now := time.Now()
-	deploy.FinishedAt = &now
-	m.store.CreateDeploy(deploy)
-
-	m.logger.Info("deploy completed", "app", appName, "status", deploy.Status)
-	return deploy, lastErr
-}
-
-// RollbackApp reverts to a previous deploy version. Stubbed for now.
-func (m *AppManager) RollbackApp(ctx context.Context, appName string, version int) (*store.Deploy, error) {
-	return nil, fmt.Errorf("%w: rollback not yet implemented", vessel.ErrNoDeployHistory)
+	return m.DeployAppFromConfig(ctx, appCfg)
 }
 
 // GetDeployHistory returns deploy history for an app.
