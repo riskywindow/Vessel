@@ -249,11 +249,24 @@ func (h *Handler) handleListContainers(ctx context.Context, conn net.Conn, param
 	var p struct {
 		AppName string `json:"app_name"`
 	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		h.writeError(conn, "INVALID_PARAMS", err.Error())
+	// params may be nil for listing all containers
+	if params != nil {
+		json.Unmarshal(params, &p)
+	}
+
+	if p.AppName != "" {
+		// List containers for a specific app
+		containers, err := h.manager.GetContainers(ctx, p.AppName)
+		if err != nil {
+			h.writeError(conn, "LIST_FAILED", err.Error())
+			return
+		}
+		h.writeData(conn, containers)
 		return
 	}
-	containers, err := h.manager.GetContainers(ctx, p.AppName)
+
+	// List all containers across all apps
+	containers, err := h.manager.ListAllContainers(ctx)
 	if err != nil {
 		h.writeError(conn, "LIST_FAILED", err.Error())
 		return

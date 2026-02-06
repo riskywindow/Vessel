@@ -17,14 +17,15 @@ import (
 
 // mockRuntime implements runtime.Runtime for testing.
 type mockRuntime struct {
-	pullImageFn       func(ctx context.Context, ref string) error
-	createContainerFn func(ctx context.Context, opts runtime.ContainerOpts) (*store.Container, error)
-	startContainerFn  func(ctx context.Context, containerID string) error
-	stopContainerFn   func(ctx context.Context, containerID string, gracePeriod time.Duration) error
-	removeContainerFn func(ctx context.Context, containerID string) error
-	execInContainerFn func(ctx context.Context, containerID string, cmd []string) error
-	containerLogsFn   func(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error)
-	containerStatsFn  func(ctx context.Context, containerID string) (*store.MetricPoint, error)
+	pullImageFn        func(ctx context.Context, ref string) error
+	createContainerFn  func(ctx context.Context, opts runtime.ContainerOpts) (*store.Container, error)
+	startContainerFn   func(ctx context.Context, containerID string) error
+	stopContainerFn    func(ctx context.Context, containerID string, gracePeriod time.Duration) error
+	removeContainerFn  func(ctx context.Context, containerID string) error
+	execInContainerFn  func(ctx context.Context, containerID string, cmd []string) error
+	containerLogsFn    func(ctx context.Context, containerID string, follow bool, tail int) (io.ReadCloser, error)
+	containerStatsFn   func(ctx context.Context, containerID string) (*store.MetricPoint, error)
+	getContainerPIDFn  func(containerID string) (int, error)
 
 	containerCounter int64 // atomic counter for generating unique IDs
 }
@@ -91,17 +92,19 @@ func (m *mockRuntime) ContainerStats(ctx context.Context, containerID string) (*
 	return &store.MetricPoint{}, nil
 }
 
+func (m *mockRuntime) GetContainerPID(containerID string) (int, error) {
+	if m.getContainerPIDFn != nil {
+		return m.getContainerPIDFn(containerID)
+	}
+	return 12345, nil
+}
+
 // newTestManager creates an AppManager with a mock runtime for testing.
 func newTestManager(t *testing.T, rt runtime.Runtime) (*AppManager, store.Store) {
 	t.Helper()
 	st := testutil.TempStore(t)
 	logger := testLogger()
-	mgr := &AppManager{
-		runtime: rt,
-		store:   st,
-		logger:  logger,
-	}
-	mgr.reconciler = NewReconciler(rt, st, logger)
+	mgr := NewAppManager(rt, st, nil, logger)
 	return mgr, st
 }
 

@@ -29,6 +29,7 @@ type Store interface {
 	// Container operations
 	CreateContainer(c *Container) error
 	GetContainer(id string) (*Container, error)
+	ListContainers() ([]*Container, error)
 	ListContainersByApp(appID string) ([]*Container, error)
 	UpdateContainer(c *Container) error
 	DeleteContainer(id string) error

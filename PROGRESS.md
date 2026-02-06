@@ -110,7 +110,10 @@
 - [ ] Implement HTTP reverse proxy with host-based routing
 - [ ] Implement load balancing across instances
 - [ ] Implement WebSocket proxying
-- [x] Implement container networking (bridge, veth pairs, NAT) — IN PROGRESS (Session 8: foundation)
+- [x] Implement container networking (bridge, veth pairs, NAT) — COMPLETE (Session 8: foundation, Session 9: lifecycle integration)
+- [x] Integrate networking into container lifecycle (deploy, stop, remove)
+- [x] `vessel network status` and `vessel network list` CLI commands
+- [x] `vessel ps` shows IP column
 - [ ] Implement internal DNS
 
 ### Week 9: Automatic TLS
@@ -480,5 +483,64 @@
 - Route table is in-memory only (stub for Session 3 reverse proxy)
 
 **Next:**
-- Session 9: Integrate networking into container lifecycle (runtime + manager)
+- Session 10: HTTP reverse proxy with host-based routing
+
+### Session 9 — 2026-02-06 ✅
+**Task:** Phase 3 Session 2 — Integrate Networking into Container Lifecycle
+
+**Completed:**
+- Added `GetContainerPID(containerID string) (int, error)` to `runtime.Runtime` interface
+  - Method already existed on LinuxRuntime, now in the interface contract
+  - Updated mock runtime in tests
+- Added `NetworkManager` field to `AppManager` struct:
+  - Updated `NewAppManager` to accept `network.NetworkManager` (can be nil)
+  - Network is optional — deploy succeeds even without networking
+- Integrated networking into deploy pipeline (`internal/manager/deploy.go`):
+  - `createAndStartManagedContainer`: after StartContainer, calls GetContainerPID → SetupContainerNetwork
+  - Sets container IP and PID fields in store
+  - Best-effort: network failure doesn't fail the deploy
+  - `stopAndRemoveContainer`: calls TeardownContainerNetwork before stopping
+- Updated Daemon (`internal/daemon/daemon.go`):
+  - Added `network` field to Daemon struct
+  - NewDaemon initializes LinuxNetworkManager (graceful degradation if fails)
+  - Start() calls network.Start() to set up bridge before accepting connections
+  - Shutdown calls network.Stop()
+- Added `ListContainers()` to Store interface and BoltStore:
+  - Returns all containers across all apps
+  - Added `ListAllContainers(ctx)` to AppManager
+  - Updated socket handler: `containers.list` supports both per-app and all-containers mode
+- Updated `vessel ps` to show IP column:
+  - Shows first container's IP with (+N) for additional instances
+- Created `vessel network` CLI commands (`internal/cli/network.go`):
+  - `vessel network status`: shows bridge, IP forwarding, allocated IPs, subnet info
+  - `vessel network list`: tabular display of container IDs, apps, IPs, states
+  - Both support `--json` output mode
+- Wrote 12 new network integration tests (`internal/manager/network_test.go`):
+  - mockNetworkManager with tracking of setup/teardown calls
+  - TestDeploy_SetsUpNetworking: verifies container gets IP
+  - TestDeploy_MultipleInstances_EachGetsIP: unique IPs per container
+  - TestDeploy_NetworkFailure_BestEffort: deploy succeeds when network fails
+  - TestDeploy_NoNetworkManager_Succeeds: nil network manager OK
+  - TestRollingDeploy_TearsDownOldNetwork: teardown on rolling update
+  - TestBlueGreenDeploy_TearsDownOldNetwork: teardown on blue-green swap
+  - TestStopAndRemoveContainer_TearsDownNetwork: teardown on stop
+  - TestDeploy_ContainerPID_StoredOnNetwork: PID stored correctly
+  - TestDeploy_GetPIDFails_NoNetworkSetup: graceful PID failure
+  - TestListAllContainers, TestListContainers_StoreMethod, TestListContainers_Empty
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 6 packages pass
+- `go vet ./...` — clean
+- manager: 56 tests (was 44, +12 new)
+- **Total: ~143 tests across all packages**
+
+**Architecture Decisions:**
+- Network setup is best-effort: deploy succeeds even if networking fails
+- GetContainerPID added to Runtime interface (was implementation-only)
+- NetworkManager is optional (nil-safe) throughout AppManager
+- ListContainers added to Store for global container listing
+- `vessel network` CLI uses daemon socket for container data
+
+**Next:**
 - Session 10: HTTP reverse proxy with host-based routing

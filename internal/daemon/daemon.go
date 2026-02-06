@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vessel/vessel/internal/manager"
+	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/paths"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
@@ -28,6 +29,7 @@ const (
 type Daemon struct {
 	runtime       runtime.Runtime
 	store         store.Store
+	network       network.NetworkManager
 	manager       *manager.AppManager
 	secretManager *store.SecretManager
 	logger        *slog.Logger
@@ -58,8 +60,18 @@ func NewDaemon(logger *slog.Logger) (*Daemon, error) {
 		return nil, fmt.Errorf("failed to create runtime: %w", err)
 	}
 
-	// Initialize the manager
-	mgr := manager.NewAppManager(rt, st, logger)
+	// Initialize the network manager
+	netMgr, err := network.NewLinuxNetworkManager(logger)
+	if err != nil {
+		logger.Warn("failed to create network manager, container networking will be unavailable", "error", err)
+	}
+
+	// Initialize the manager (netMgr may be nil if network init failed)
+	var netIface network.NetworkManager
+	if netMgr != nil {
+		netIface = netMgr
+	}
+	mgr := manager.NewAppManager(rt, st, netIface, logger)
 
 	// Initialize the secret manager
 	sm, err := initSecretManager(st, logger)
@@ -75,6 +87,7 @@ func NewDaemon(logger *slog.Logger) (*Daemon, error) {
 	return &Daemon{
 		runtime:       rt,
 		store:         st,
+		network:       netIface,
 		manager:       mgr,
 		secretManager: sm,
 		logger:        logger,
@@ -139,6 +152,15 @@ func (d *Daemon) GetSecretManager() *store.SecretManager {
 // Start starts the daemon. It blocks until the context is cancelled or Stop is called.
 func (d *Daemon) Start(ctx context.Context) error {
 	d.logger.Info("starting vessel daemon")
+
+	// Start network bridge (sets up vessel0 bridge, NAT rules, IP forwarding)
+	if d.network != nil {
+		if err := d.network.Start(ctx); err != nil {
+			d.logger.Warn("failed to start network bridge, container networking may not work", "error", err)
+		} else {
+			d.logger.Info("network bridge initialized")
+		}
+	}
 
 	// Remove stale socket file
 	os.Remove(paths.SocketPath)
@@ -227,6 +249,13 @@ func (d *Daemon) shutdown() error {
 		d.logger.Info("all goroutines stopped")
 	case <-time.After(30 * time.Second):
 		d.logger.Warn("shutdown timed out, forcing exit")
+	}
+
+	// Stop network manager
+	if d.network != nil {
+		if err := d.network.Stop(); err != nil {
+			d.logger.Error("failed to stop network manager", "error", err)
+		}
 	}
 
 	// Close the store

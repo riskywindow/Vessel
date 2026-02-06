@@ -373,6 +373,23 @@ func (m *AppManager) createAndStartManagedContainer(ctx context.Context, app *st
 		return nil, fmt.Errorf("failed to start container: %w", err)
 	}
 
+	// Set up container networking (best-effort — deploy succeeds even if networking fails)
+	if m.network != nil {
+		pid, err := m.runtime.GetContainerPID(c.ID)
+		if err != nil {
+			m.logger.Warn("failed to get container PID for networking", "container", c.ID[:12], "error", err)
+		} else {
+			netInfo, err := m.network.SetupContainerNetwork(ctx, c.ID, pid)
+			if err != nil {
+				m.logger.Error("failed to setup container network", "container", c.ID[:12], "error", err)
+			} else {
+				c.IP = netInfo.IP.String()
+				c.PID = pid
+				m.logger.Info("container network configured", "container", c.ID[:12], "ip", c.IP)
+			}
+		}
+	}
+
 	now := time.Now()
 	c.State = store.ContainerStateRunning
 	c.StartedAt = &now
@@ -399,6 +416,13 @@ func (m *AppManager) getRunningContainers(appID string) ([]*store.Container, err
 
 // stopAndRemoveContainer stops and removes a single container.
 func (m *AppManager) stopAndRemoveContainer(ctx context.Context, c *store.Container) {
+	// Teardown container networking first
+	if m.network != nil {
+		if err := m.network.TeardownContainerNetwork(ctx, c.ID); err != nil {
+			m.logger.Warn("failed to teardown container network", "container", c.ID[:12], "error", err)
+		}
+	}
+
 	if c.State == store.ContainerStateRunning {
 		if err := m.runtime.StopContainer(ctx, c.ID, 10*time.Second); err != nil {
 			m.logger.Error("failed to stop old container", "container", c.ID[:12], "error", err)

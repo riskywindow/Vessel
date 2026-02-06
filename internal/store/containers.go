@@ -60,6 +60,30 @@ func (s *BoltStore) GetContainer(id string) (*Container, error) {
 	return &container, nil
 }
 
+// ListContainers returns all containers across all apps.
+func (s *BoltStore) ListContainers() ([]*Container, error) {
+	var containers []*Container
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketContainers)
+
+		return b.ForEach(func(k, v []byte) error {
+			var container Container
+			if err := decode(v, &container); err != nil {
+				return fmt.Errorf("failed to decode container %s: %w", k, err)
+			}
+			containers = append(containers, &container)
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return containers, nil
+}
+
 // ListContainersByApp returns all containers for a given app.
 func (s *BoltStore) ListContainersByApp(appID string) ([]*Container, error) {
 	var containers []*Container

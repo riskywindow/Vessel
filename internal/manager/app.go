@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vessel/vessel/internal/config"
+	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
 )
@@ -17,6 +18,7 @@ import (
 type AppManager struct {
 	runtime       runtime.Runtime
 	store         store.Store
+	network       network.NetworkManager
 	reconciler    *Reconciler
 	secretManager *store.SecretManager
 	logger        *slog.Logger
@@ -24,10 +26,11 @@ type AppManager struct {
 }
 
 // NewAppManager creates a new AppManager.
-func NewAppManager(rt runtime.Runtime, st store.Store, logger *slog.Logger) *AppManager {
+func NewAppManager(rt runtime.Runtime, st store.Store, net network.NetworkManager, logger *slog.Logger) *AppManager {
 	m := &AppManager{
 		runtime: rt,
 		store:   st,
+		network: net,
 		logger:  logger,
 	}
 	m.reconciler = NewReconciler(rt, st, logger)
@@ -60,6 +63,15 @@ func (m *AppManager) GetApp(ctx context.Context, appName string) (*store.App, er
 		return nil, err
 	}
 	return app, nil
+}
+
+// ListAllContainers returns all containers across all apps.
+func (m *AppManager) ListAllContainers(ctx context.Context) ([]*store.Container, error) {
+	containers, err := m.store.ListContainers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all containers: %w", err)
+	}
+	return containers, nil
 }
 
 // GetContainers returns all containers for an app.

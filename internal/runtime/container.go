@@ -77,6 +77,7 @@ type Runtime interface {
 	PullImage(ctx context.Context, ref string) error
 	ExecInContainer(ctx context.Context, containerID string, cmd []string) error
 	ContainerStats(ctx context.Context, containerID string) (*store.MetricPoint, error)
+	GetContainerPID(containerID string) (int, error)
 }
 
 // LinuxRuntime implements the Runtime interface using Linux primitives.

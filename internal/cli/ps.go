@@ -51,15 +51,15 @@ func runPs(cmd *cobra.Command, args []string) error {
 	}
 
 	// Table header
-	fmt.Printf("%-16s %-12s %-12s %-24s %-12s\n", "NAME", "STATUS", "INSTANCES", "IMAGE", "UPTIME")
-	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("%-16s %-12s %-12s %-16s %-24s %-12s\n", "NAME", "STATUS", "INSTANCES", "IP", "IMAGE", "UPTIME")
+	fmt.Println(strings.Repeat("-", 96))
 
 	for _, app := range apps {
 		if !showAll && app.State == store.AppStateStopped {
 			continue
 		}
 
-		// Get container info for instance count
+		// Get container info for instance count and IPs
 		var containers []*store.Container
 		client.Call("containers.list", map[string]string{"app_name": app.Name}, &containers)
 
@@ -71,6 +71,16 @@ func runPs(cmd *cobra.Command, args []string) error {
 		}
 
 		instances := fmt.Sprintf("%d/%d", running, app.Instances)
+
+		// Collect container IP for display
+		ip := "-"
+		if len(containers) > 0 && containers[0].IP != "" {
+			ip = containers[0].IP
+			if len(containers) > 1 {
+				ip = fmt.Sprintf("%s (+%d)", ip, len(containers)-1)
+			}
+		}
+
 		uptime := formatUptime(app.CreatedAt)
 		if app.State == store.AppStateStopped {
 			uptime = "—"
@@ -81,10 +91,11 @@ func runPs(cmd *cobra.Command, args []string) error {
 			image = image[:21] + "..."
 		}
 
-		fmt.Printf("%-16s %-12s %-12s %-24s %-12s\n",
+		fmt.Printf("%-16s %-12s %-12s %-16s %-24s %-12s\n",
 			truncate(app.Name, 16),
 			string(app.State),
 			instances,
+			ip,
 			image,
 			uptime,
 		)

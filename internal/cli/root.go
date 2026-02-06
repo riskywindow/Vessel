@@ -57,6 +57,11 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(fmtCmd)
+	rootCmd.AddCommand(networkCmd)
+
+	// Register network subcommands
+	networkCmd.AddCommand(networkStatusCmd)
+	networkCmd.AddCommand(networkListCmd)
 }
 
 // notImplemented returns a RunE function that prints "not yet implemented".
