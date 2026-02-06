@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vessel/vessel/internal/config"
@@ -25,7 +26,9 @@ Examples:
   vessel deploy --app my-api             # Deploy only 'my-api'
   vessel deploy --all                    # Explicitly deploy all apps
   vessel deploy --app my-api --image myorg/api:v2.0  # Override image
-  vessel deploy --app my-api --strategy blue-green    # Override strategy`,
+  vessel deploy --app my-api --strategy blue-green    # Override strategy
+  vessel deploy --env FOO=bar --env BAZ=qux           # Set env vars
+  vessel deploy --env-file .env                        # Load env from file`,
 	RunE: runDeploy,
 }
 
@@ -34,12 +37,18 @@ func init() {
 	deployCmd.Flags().String("app", "", "deploy only this app")
 	deployCmd.Flags().String("image", "", "override the image from config")
 	deployCmd.Flags().String("strategy", "", "override deploy strategy (rolling, blue-green)")
+	deployCmd.Flags().StringArray("env", nil, "set environment variable (KEY=VALUE, can be repeated)")
+	deployCmd.Flags().String("env-file", "", "path to .env file")
+	deployCmd.Flags().Bool("continue-on-error", false, "continue deploying remaining apps if one fails")
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
 	appName, _ := cmd.Flags().GetString("app")
 	imageOverride, _ := cmd.Flags().GetString("image")
 	strategyOverride, _ := cmd.Flags().GetString("strategy")
+	envFlags, _ := cmd.Flags().GetStringArray("env")
+	envFile, _ := cmd.Flags().GetString("env-file")
+	continueOnError, _ := cmd.Flags().GetBool("continue-on-error")
 
 	// Parse config
 	cfg, err := config.Load(configFile)
@@ -49,6 +58,24 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	if len(cfg.Apps) == 0 {
 		return fmt.Errorf("no apps defined in %s", configFile)
+	}
+
+	// Parse --env-file if provided
+	var envFileVars map[string]string
+	if envFile != "" {
+		envFileVars, err = config.ParseEnvFile(envFile)
+		if err != nil {
+			return fmt.Errorf("failed to parse env file: %w", err)
+		}
+	}
+
+	// Parse --env flags
+	var cliEnvVars map[string]string
+	if len(envFlags) > 0 {
+		cliEnvVars, err = config.ParseCLIEnvFlags(envFlags)
+		if err != nil {
+			return fmt.Errorf("invalid --env flag: %w", err)
+		}
 	}
 
 	// Determine which apps to deploy
@@ -69,7 +96,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		appsToDeploy = cfg.Apps
 	}
 
-	// Apply overrides
+	// Apply overrides and merge env vars
 	for i := range appsToDeploy {
 		if imageOverride != "" {
 			appsToDeploy[i].Image = imageOverride
@@ -77,19 +104,84 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if strategyOverride != "" {
 			appsToDeploy[i].Deploy.Strategy = strategyOverride
 		}
+
+		// Merge env: config env < .env file < CLI flags
+		// (image env is handled by the runtime layer)
+		appsToDeploy[i].Env = config.MergeEnv(
+			appsToDeploy[i].Env,
+			envFileVars,
+			cliEnvVars,
+		)
 	}
 
 	client := daemon.NewClient("")
 
 	// Deploy each app
-	var lastErr error
+	type deployResult struct {
+		name     string
+		oldVer   int
+		newVer   int
+		duration time.Duration
+		err      error
+	}
+	var results []deployResult
+
 	for _, appCfg := range appsToDeploy {
-		if err := deployOneApp(client, &appCfg); err != nil {
-			lastErr = err
+		start := time.Now()
+		oldVer := getAppVersion(client, appCfg.Name)
+		err := deployOneApp(client, &appCfg)
+		dur := time.Since(start)
+
+		newVer := getAppVersion(client, appCfg.Name)
+		results = append(results, deployResult{
+			name:     appCfg.Name,
+			oldVer:   oldVer,
+			newVer:   newVer,
+			duration: dur,
+			err:      err,
+		})
+
+		if err != nil && !continueOnError {
+			break
 		}
 	}
 
-	return lastErr
+	// Print summary if deploying multiple apps
+	if len(appsToDeploy) > 1 {
+		fmt.Println("\nDeploy Summary:")
+		for _, r := range results {
+			if r.err != nil {
+				fmt.Printf("  x %-15s v%d -> v%d  FAILED (%v)\n", r.name, r.oldVer, r.newVer, r.err)
+			} else {
+				fmt.Printf("  > %-15s v%d -> v%d  (%s)\n", r.name, r.oldVer, r.newVer, r.duration.Round(time.Second))
+			}
+		}
+	}
+
+	// Return error if any deploy failed
+	for _, r := range results {
+		if r.err != nil {
+			return fmt.Errorf("one or more deploys failed")
+		}
+	}
+
+	return nil
+}
+
+// getAppVersion returns the current deploy version for an app, or 0 if not found.
+func getAppVersion(client *daemon.Client, appName string) int {
+	var deploys []store.Deploy
+	err := client.Call("apps.history", map[string]string{"name": appName}, &deploys)
+	if err != nil || len(deploys) == 0 {
+		return 0
+	}
+	maxVer := 0
+	for _, d := range deploys {
+		if d.Version > maxVer {
+			maxVer = d.Version
+		}
+	}
+	return maxVer
 }
 
 func deployOneApp(client *daemon.Client, appCfg *config.AppConfig) error {

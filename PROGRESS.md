@@ -5,9 +5,9 @@
 
 ---
 
-## Current Phase: PHASE 2 — App Manager & Daemon
+## Current Phase: PHASE 3 — Networking & TLS
 
-### Status: IN PROGRESS
+### Status: NOT STARTED (Phase 2 COMPLETE)
 
 ---
 
@@ -67,7 +67,7 @@
 - [x] Implement capability dropping (Docker-compatible default set)
 - [x] NO_NEW_PRIVS enforcement
 
-## Phase 2: App Manager & Deploys (Weeks 5-7) — IN PROGRESS
+## Phase 2: App Manager & Deploys (Weeks 5-7) ✅ COMPLETE
 
 ### Week 5: State Management and Basic App Lifecycle ✅
 - [x] Implement Vessel daemon (internal/daemon/daemon.go)
@@ -90,12 +90,19 @@
 - [x] Implement `vessel rollback`
 - [x] Implement `vessel history`
 
-### Week 7: Environment, Secrets, and Multi-App
-- [ ] Implement environment variable injection
-- [ ] Implement encrypted secret store
-- [ ] Implement `vessel secret` subcommands
-- [ ] Support multiple apps in a single vessel.toml
-- [ ] Implement `vessel deploy --all`
+### Week 7: Environment, Secrets, and Multi-App ✅
+- [x] Implement environment variable injection
+- [x] Implement .env file parser (internal/config/envfile.go)
+- [x] Implement --env and --env-file CLI flags for deploy
+- [x] Implement env merge order: image < config < .env < CLI flags
+- [x] Implement encrypted secret store (AES-256-GCM + Argon2id)
+- [x] Implement `vessel secret set/get/list/rm` subcommands
+- [x] Implement secret reference resolution (${secret:key}) during deploy
+- [x] Support multiple apps in a single vessel.toml ([[app]] syntax)
+- [x] Implement `vessel deploy --all` with --continue-on-error
+- [x] Implement deploy summary for multi-app deploys
+- [x] Implement `vessel init` — interactive config generator
+- [x] Implement `vessel fmt` — config validator
 
 ## Phase 3: Networking & TLS (Weeks 8-9) — NOT STARTED
 
@@ -126,12 +133,12 @@
 ## Phase 5: CLI Polish & Remote Deploy (Week 11) — NOT STARTED
 - [ ] Styled terminal output (lipgloss)
 - [ ] Progress indicators for image pulls and deploys
-- [ ] `vessel init` — interactive setup
+- [x] `vessel init` — interactive setup (moved to Phase 2 Week 7)
 - [ ] `vessel exec` — run command inside container
 - [ ] `vessel ssh` — remote deploy via SSH
 - [ ] Shell autocomplete (bash, zsh, fish)
 - [ ] `vessel doctor` — system prerequisites check
-- [ ] `vessel fmt` — config validation and formatting
+- [x] `vessel fmt` — config validation and formatting (moved to Phase 2 Week 7)
 
 ## Phase 6: Web Dashboard (Weeks 12-13) — NOT STARTED
 
@@ -339,3 +346,75 @@
 
 **Next:**
 - Week 7: Environment variables, encrypted secrets, multi-app deploys
+
+### Session 7 — 2026-02-05 ✅
+**Task:** Phase 2 Week 7 — Environment Variables, Secrets, Multi-App, CLI Tools
+
+**Completed:**
+- Implemented .env file parser (`internal/config/envfile.go`, ~140 lines):
+  - Standard KEY=VALUE format, comments, blank lines
+  - Quoted values (single and double quotes)
+  - Variable references (${VAR}, resolved from same file or OS env)
+  - Secret references (${secret:key}) preserved for deploy-time resolution
+  - MergeEnv() for merge-order: image < config < .env < CLI flags
+  - ParseCLIEnvFlags() for --env KEY=VALUE parsing
+- Implemented encrypted secret store (`internal/store/crypto.go`, ~140 lines):
+  - AES-256-GCM encryption with random nonces
+  - Argon2id key derivation from master password + salt
+  - SecretManager wraps Store with encrypt/decrypt
+  - Salt generation and persistence to /var/lib/vessel/secrets/salt
+- Implemented `vessel secret` CLI commands (`internal/cli/secrets.go`, ~190 lines):
+  - `vessel secret set <key> <value>` — encrypt and store
+  - `vessel secret get <key>` — decrypt and display
+  - `vessel secret list` — tabular display with timestamps
+  - `vessel secret rm <key>` — delete
+- Implemented secret reference resolution in deploy pipeline:
+  - `resolveSecretRefs()` scans env values for ${secret:key} patterns
+  - Called before image pull in DeployAppFromConfig
+  - Fails deploy if secret not found or secret manager unavailable
+- Updated daemon for secrets:
+  - Daemon initializes SecretManager on startup
+  - Master password from VESSEL_MASTER_PASSWORD env var (or default)
+  - Salt persisted to disk, loaded on daemon restart
+  - Socket handler: secrets.set, secrets.get, secrets.list, secrets.delete methods
+- Updated deploy CLI (`internal/cli/deploy.go`):
+  - Added --env KEY=VALUE (repeatable) and --env-file .env flags
+  - Added --continue-on-error for multi-app deploys
+  - Deploy summary with version transitions and timing
+- Implemented `vessel init` (`internal/cli/init_cmd.go`, ~170 lines):
+  - Interactive prompts: name, image, port, hostname, memory, instances, env vars, strategy
+  - Generates valid TOML config
+  - Option to deploy immediately after generation
+- Implemented `vessel fmt` (`internal/cli/fmt.go`, ~60 lines):
+  - Validates TOML syntax and config semantics
+  - Reports all validation errors with context
+- Wrote comprehensive tests (34 new tests):
+  - config/envfile_test.go: 13 tests (parsing, quotes, var refs, merge, CLI flags)
+  - config/multiapp_test.go: 6 tests (multi-app parsing, defaults, validation, secret refs)
+  - store/crypto_test.go: 11 tests (salt, key derivation, encrypt/decrypt, SecretManager operations)
+  - manager/secrets_test.go: 8 tests (secret resolution, deploy with secrets, merge order)
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 5 packages pass
+- `go vet ./...` — clean
+- config: 24 tests (was 9, +15 new)
+- daemon: 10 tests
+- manager: 44 tests (was 36, +8 new)
+- runtime: 7 tests
+- store: 26 tests (was 15, +11 new)
+- **Total: ~111 tests across all packages**
+
+**Dependencies Added:**
+- `golang.org/x/crypto` for Argon2id key derivation
+
+**Decisions:**
+- Secrets use AES-256-GCM with Argon2id key derivation (time=1, memory=64MB, threads=4)
+- Master password from VESSEL_MASTER_PASSWORD env var, defaults to built-in key for dev
+- Salt persisted to /var/lib/vessel/secrets/salt (generated once)
+- Secret references use ${secret:key} syntax in env values
+- Multi-app configs use [[app]] TOML array syntax (already supported by parser)
+- Deploy merge order: image config < vessel.toml [env] < .env file < --env CLI flags
+- vessel init and vessel fmt moved from Phase 5 to Phase 2 Week 7
+
+**Phase 2 is COMPLETE. Next: Phase 3 — Networking & TLS**

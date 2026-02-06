@@ -15,11 +15,12 @@ import (
 
 // AppManager orchestrates application lifecycle operations.
 type AppManager struct {
-	runtime    runtime.Runtime
-	store      store.Store
-	reconciler *Reconciler
-	logger     *slog.Logger
-	mu         sync.Mutex
+	runtime       runtime.Runtime
+	store         store.Store
+	reconciler    *Reconciler
+	secretManager *store.SecretManager
+	logger        *slog.Logger
+	mu            sync.Mutex
 }
 
 // NewAppManager creates a new AppManager.
@@ -31,6 +32,11 @@ func NewAppManager(rt runtime.Runtime, st store.Store, logger *slog.Logger) *App
 	}
 	m.reconciler = NewReconciler(rt, st, logger)
 	return m
+}
+
+// SetSecretManager sets the secret manager for deploy-time secret resolution.
+func (m *AppManager) SetSecretManager(sm *store.SecretManager) {
+	m.secretManager = sm
 }
 
 // GetReconciler returns the manager's reconciler for use by the daemon.

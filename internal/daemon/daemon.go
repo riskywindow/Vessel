@@ -18,15 +18,22 @@ import (
 	"github.com/vessel/vessel/internal/store"
 )
 
+const (
+	// defaultMasterPassword is used when no master password is configured.
+	// In production, this should be prompted or set via env var.
+	defaultMasterPassword = "vessel-default-master-key"
+)
+
 // Daemon is the long-running Vessel process that manages containers.
 type Daemon struct {
-	runtime  runtime.Runtime
-	store    store.Store
-	manager  *manager.AppManager
-	logger   *slog.Logger
-	socket   net.Listener
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	runtime       runtime.Runtime
+	store         store.Store
+	manager       *manager.AppManager
+	secretManager *store.SecretManager
+	logger        *slog.Logger
+	socket        net.Listener
+	stopCh        chan struct{}
+	wg            sync.WaitGroup
 }
 
 // NewDaemon creates a new Daemon instance.
@@ -54,13 +61,64 @@ func NewDaemon(logger *slog.Logger) (*Daemon, error) {
 	// Initialize the manager
 	mgr := manager.NewAppManager(rt, st, logger)
 
+	// Initialize the secret manager
+	sm, err := initSecretManager(st, logger)
+	if err != nil {
+		logger.Warn("failed to initialize secret manager, secrets will be unavailable", "error", err)
+	}
+
+	// Wire the secret manager into the manager for deploy-time secret resolution
+	if sm != nil {
+		mgr.SetSecretManager(sm)
+	}
+
 	return &Daemon{
-		runtime: rt,
-		store:   st,
-		manager: mgr,
-		logger:  logger,
-		stopCh:  make(chan struct{}),
+		runtime:       rt,
+		store:         st,
+		manager:       mgr,
+		secretManager: sm,
+		logger:        logger,
+		stopCh:        make(chan struct{}),
 	}, nil
+}
+
+// initSecretManager creates or loads the SecretManager with persisted salt.
+func initSecretManager(st store.Store, logger *slog.Logger) (*store.SecretManager, error) {
+	// Ensure secrets directory exists
+	if err := os.MkdirAll(paths.SecretsDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create secrets directory: %w", err)
+	}
+
+	// Get master password from env var, or use default
+	masterPassword := os.Getenv("VESSEL_MASTER_PASSWORD")
+	if masterPassword == "" {
+		masterPassword = defaultMasterPassword
+		logger.Debug("using default master password (set VESSEL_MASTER_PASSWORD to override)")
+	}
+
+	// Load or generate salt
+	var salt []byte
+	saltData, err := os.ReadFile(paths.SaltPath)
+	if err == nil && len(saltData) > 0 {
+		salt = saltData
+	} else {
+		// First-time: generate and persist salt
+		salt, err = store.GenerateSalt()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate salt: %w", err)
+		}
+		if err := os.WriteFile(paths.SaltPath, salt, 0600); err != nil {
+			return nil, fmt.Errorf("failed to save salt: %w", err)
+		}
+		logger.Info("generated new encryption salt")
+	}
+
+	sm, err := store.NewSecretManager(st, masterPassword, salt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret manager: %w", err)
+	}
+
+	return sm, nil
 }
 
 // GetManager returns the daemon's app manager.
@@ -71,6 +129,11 @@ func (d *Daemon) GetManager() *manager.AppManager {
 // GetRuntime returns the daemon's runtime.
 func (d *Daemon) GetRuntime() runtime.Runtime {
 	return d.runtime
+}
+
+// GetSecretManager returns the daemon's secret manager.
+func (d *Daemon) GetSecretManager() *store.SecretManager {
+	return d.secretManager
 }
 
 // Start starts the daemon. It blocks until the context is cancelled or Stop is called.
@@ -208,7 +271,7 @@ func (d *Daemon) acceptConnections(ctx context.Context) {
 func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	handler := NewHandler(d.manager, d.runtime, d.logger)
+	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.logger)
 	handler.Handle(ctx, conn)
 }
 

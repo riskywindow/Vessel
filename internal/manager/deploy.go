@@ -3,12 +3,16 @@ package manager
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/vessel/vessel/internal/config"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
 )
+
+// secretRefPattern matches ${secret:key-name} references in env values.
+var secretRefPattern = regexp.MustCompile(`\$\{secret:([^}]+)\}`)
 
 const (
 	// defaultDrainTimeout is how long to wait for in-flight requests before
@@ -36,6 +40,11 @@ func (m *AppManager) DeployAppFromConfig(ctx context.Context, appCfg *config.App
 
 	m.logger.Info("starting deploy", "app", appCfg.Name, "image", appCfg.Image,
 		"instances", appCfg.Instances, "strategy", appCfg.Deploy.Strategy)
+
+	// Resolve secret references in env vars
+	if err := m.resolveSecretRefs(appCfg); err != nil {
+		return nil, fmt.Errorf("failed to resolve secrets: %w", err)
+	}
 
 	// Pull the image
 	if err := m.runtime.PullImage(ctx, appCfg.Image); err != nil {
@@ -424,6 +433,83 @@ func (m *AppManager) healthTimeout(appCfg *config.AppConfig) time.Duration {
 		return time.Duration(retries+2) * interval
 	}
 	return defaultDeployHealthTimeout
+}
+
+// resolveSecretRefs scans env values for ${secret:key} patterns and resolves them
+// using the secret manager. The resolved plaintext values replace the references.
+func (m *AppManager) resolveSecretRefs(appCfg *config.AppConfig) error {
+	if len(appCfg.Env) == 0 {
+		return nil
+	}
+
+	for key, value := range appCfg.Env {
+		resolved, err := m.resolveSecretValue(value)
+		if err != nil {
+			return fmt.Errorf("env %s: %w", key, err)
+		}
+		appCfg.Env[key] = resolved
+	}
+	return nil
+}
+
+// resolveSecretValue replaces all ${secret:name} references in a string.
+func (m *AppManager) resolveSecretValue(value string) (string, error) {
+	matches := secretRefPattern.FindAllStringSubmatchIndex(value, -1)
+	if len(matches) == 0 {
+		return value, nil
+	}
+
+	if m.secretManager == nil {
+		return "", fmt.Errorf("secret references found but secret manager is not initialized")
+	}
+
+	result := value
+	// Process matches in reverse order to preserve indices
+	for i := len(matches) - 1; i >= 0; i-- {
+		match := matches[i]
+		fullStart, fullEnd := match[0], match[1]
+		nameStart, nameEnd := match[2], match[3]
+
+		secretName := value[nameStart:nameEnd]
+		secretValue, err := m.secretManager.GetSecret(secretName)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve secret %q: %w", secretName, err)
+		}
+
+		result = result[:fullStart] + secretValue + result[fullEnd:]
+	}
+
+	return result, nil
+}
+
+// ResolveSecretRefs is exported for testing.
+func ResolveSecretRefs(env map[string]string, sm *store.SecretManager) (map[string]string, error) {
+	if len(env) == 0 {
+		return env, nil
+	}
+	result := make(map[string]string, len(env))
+	for k, v := range env {
+		matches := secretRefPattern.FindAllStringSubmatchIndex(v, -1)
+		if len(matches) == 0 {
+			result[k] = v
+			continue
+		}
+		if sm == nil {
+			return nil, fmt.Errorf("env %s: secret references found but secret manager is not initialized", k)
+		}
+		resolved := v
+		for i := len(matches) - 1; i >= 0; i-- {
+			match := matches[i]
+			secretName := v[match[2]:match[3]]
+			secretValue, err := sm.GetSecret(secretName)
+			if err != nil {
+				return nil, fmt.Errorf("env %s: failed to resolve secret %q: %w", k, secretName, err)
+			}
+			resolved = resolved[:match[0]] + secretValue + resolved[match[1]:]
+		}
+		result[k] = resolved
+	}
+	return result, nil
 }
 
 // configToResourceLimits converts a config.ResourceConfig to store.ResourceLimits.

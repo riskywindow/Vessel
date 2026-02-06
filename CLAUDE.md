@@ -704,6 +704,7 @@ Only use these dependencies. If you need something not on this list, document wh
 | slog | Structured logging | `log/slog` (stdlib) |
 | certmagic | ACME/TLS automation | `github.com/caddyserver/certmagic` |
 | golang.org/x/sys | Linux syscall wrappers | `golang.org/x/sys/unix` |
+| golang.org/x/crypto | Argon2id key derivation for secrets | `golang.org/x/crypto/argon2` |
 | google/uuid | UUID generation | `github.com/google/uuid` |
 | gorilla/websocket | WebSocket support | `github.com/gorilla/websocket` |
 
@@ -742,6 +743,35 @@ Every Claude Code session MUST follow this workflow:
 
 ## Current Phase
 
-**PHASE 0 — Foundations**
+**PHASE 3 — Networking & TLS** (Phase 0, 1, and 2 COMPLETE)
 
 See PROGRESS.md for detailed status.
+
+## Architecture Decisions Log
+
+### Secrets Architecture (Phase 2 Week 7)
+- Secrets use **AES-256-GCM** encryption with **Argon2id** key derivation
+- Argon2id params: time=1, memory=64MB, threads=4, key=32 bytes
+- Salt generated once, persisted to `/var/lib/vessel/secrets/salt`
+- Master password: `VESSEL_MASTER_PASSWORD` env var (default for dev)
+- SecretManager wraps Store operations with encrypt/decrypt
+- Secret references: `${secret:key-name}` syntax in env values
+- Resolution happens during deploy (before image pull)
+
+### Multi-App Config (Phase 2 Week 7)
+- Uses `[[app]]` TOML array of tables syntax
+- Per-app env via `[app.env]` sections
+- `vessel deploy --all` deploys in config order
+- `--continue-on-error` flag for fault-tolerant multi-app deploys
+- Deploy summary shows version transitions and timing
+
+### Environment Variable Merge Order (Phase 2 Week 7)
+- Image config env (lowest priority)
+- Config file env (`[env]` section in vessel.toml)
+- .env file (`--env-file` flag)
+- CLI flags (`--env KEY=VALUE`, highest priority)
+
+### Deploy Strategies (Phase 2 Week 6)
+- Rolling: replace containers one at a time with drain timeout
+- Blue-Green: start all new, health check, atomic swap, remove old
+- Deploy-time health checks separate from continuous monitoring (Phase 4)

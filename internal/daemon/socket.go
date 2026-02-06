@@ -35,17 +35,19 @@ type ErrorResponse struct {
 
 // Handler dispatches requests to the appropriate manager methods.
 type Handler struct {
-	manager *manager.AppManager
-	runtime runtime.Runtime
-	logger  *slog.Logger
+	manager       *manager.AppManager
+	runtime       runtime.Runtime
+	secretManager *store.SecretManager
+	logger        *slog.Logger
 }
 
 // NewHandler creates a new request handler.
-func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, logger *slog.Logger) *Handler {
+func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, logger *slog.Logger) *Handler {
 	return &Handler{
-		manager: mgr,
-		runtime: rt,
-		logger:  logger,
+		manager:       mgr,
+		runtime:       rt,
+		secretManager: sm,
+		logger:        logger,
 	}
 }
 
@@ -88,6 +90,14 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleContainerLogs(ctx, conn, req.Params)
 	case "containers.stats":
 		h.handleContainerStats(ctx, conn, req.Params)
+	case "secrets.set":
+		h.handleSecretSet(ctx, conn, req.Params)
+	case "secrets.get":
+		h.handleSecretGet(ctx, conn, req.Params)
+	case "secrets.list":
+		h.handleSecretList(ctx, conn)
+	case "secrets.delete":
+		h.handleSecretDelete(ctx, conn, req.Params)
 	case "ping":
 		h.writeData(conn, map[string]string{"status": "ok"})
 	default:
@@ -301,6 +311,92 @@ func (h *Handler) handleContainerStats(ctx context.Context, conn net.Conn, param
 		return
 	}
 	h.writeData(conn, stats)
+}
+
+func (h *Handler) handleSecretSet(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	if h.secretManager == nil {
+		h.writeError(conn, "SECRET_UNAVAILABLE", "secret manager not initialized")
+		return
+	}
+	if err := h.secretManager.SetSecret(p.Key, p.Value); err != nil {
+		h.writeError(conn, "SECRET_SET_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleSecretGet(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	if h.secretManager == nil {
+		h.writeError(conn, "SECRET_UNAVAILABLE", "secret manager not initialized")
+		return
+	}
+	value, err := h.secretManager.GetSecret(p.Key)
+	if err != nil {
+		h.writeError(conn, "SECRET_GET_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, map[string]string{"value": value})
+}
+
+func (h *Handler) handleSecretList(ctx context.Context, conn net.Conn) {
+	if h.secretManager == nil {
+		h.writeError(conn, "SECRET_UNAVAILABLE", "secret manager not initialized")
+		return
+	}
+	keys, err := h.secretManager.ListSecretKeys()
+	if err != nil {
+		h.writeError(conn, "SECRET_LIST_FAILED", err.Error())
+		return
+	}
+
+	// Return secret metadata (keys + timestamps, no values)
+	var secrets []store.Secret
+	for _, key := range keys {
+		meta, err := h.secretManager.GetSecretMetadata(key)
+		if err != nil {
+			continue
+		}
+		secrets = append(secrets, store.Secret{
+			Key:       meta.Key,
+			CreatedAt: meta.CreatedAt,
+			UpdatedAt: meta.UpdatedAt,
+		})
+	}
+	h.writeData(conn, secrets)
+}
+
+func (h *Handler) handleSecretDelete(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	if h.secretManager == nil {
+		h.writeError(conn, "SECRET_UNAVAILABLE", "secret manager not initialized")
+		return
+	}
+	if err := h.secretManager.DeleteSecret(p.Key); err != nil {
+		h.writeError(conn, "SECRET_DELETE_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, map[string]string{"status": "deleted"})
 }
 
 // writeData sends a successful response.

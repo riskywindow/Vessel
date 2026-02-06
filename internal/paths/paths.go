@@ -27,6 +27,9 @@ var (
 	// VaultPath is the path to the encrypted secrets file.
 	VaultPath = filepath.Join(SecretsDir, "vault.enc")
 
+	// SaltPath is the path to the Argon2id salt for secret encryption.
+	SaltPath = filepath.Join(SecretsDir, "salt")
+
 	// TLSDir stores TLS certificates.
 	TLSDir = filepath.Join(RootDir, "tls")
 
