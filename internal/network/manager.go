@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,11 +17,15 @@ import (
 // DefaultProxyAddr is the default address the reverse proxy listens on.
 const DefaultProxyAddr = ":80"
 
+// DefaultDNSAddr is the address the internal DNS server listens on.
+const DefaultDNSAddr = "10.88.0.1:53"
+
 // LinuxNetworkManager implements NetworkManager using Linux bridge networking.
 type LinuxNetworkManager struct {
 	bridge    *BridgeNetwork
 	allocator *IPAllocator
 	proxy     *ReverseProxy
+	dns       *DNSServer
 	mu        sync.RWMutex
 	logger    *slog.Logger
 	proxyAddr string
@@ -46,20 +51,32 @@ func NewLinuxNetworkManagerWithProxy(logger *slog.Logger, proxyAddr string) (*Li
 
 	bridge := NewBridgeNetwork(BridgeName, BridgeSubnet, logger)
 	proxy := NewReverseProxy(logger)
+	dnsServer := NewDNSServer(logger, "")
 
 	return &LinuxNetworkManager{
 		bridge:    bridge,
 		allocator: allocator,
 		proxy:     proxy,
+		dns:       dnsServer,
 		logger:    logger,
 		proxyAddr: proxyAddr,
 	}, nil
 }
 
-// Start initializes the network bridge and starts the reverse proxy.
+// Start initializes the network bridge, starts the DNS server, and starts the reverse proxy.
 func (m *LinuxNetworkManager) Start(ctx context.Context) error {
 	if err := m.bridge.Setup(); err != nil {
 		return err
+	}
+
+	// Start DNS server in background
+	if m.dns != nil {
+		go func() {
+			if err := m.dns.Start(DefaultDNSAddr); err != nil {
+				m.logger.Error("DNS server error", "error", err)
+			}
+		}()
+		m.logger.Info("DNS server started", "addr", DefaultDNSAddr)
 	}
 
 	// Start proxy in background
@@ -73,13 +90,30 @@ func (m *LinuxNetworkManager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down the reverse proxy.
+// Stop gracefully shuts down the reverse proxy and DNS server.
 // The bridge is intentionally NOT torn down — containers may still be using it,
 // and it persists across daemon restarts.
 func (m *LinuxNetworkManager) Stop() error {
+	var errs []error
+
+	// Stop DNS server
+	if m.dns != nil {
+		if err := m.dns.Stop(); err != nil {
+			errs = append(errs, fmt.Errorf("dns shutdown: %w", err))
+		}
+	}
+
+	// Stop reverse proxy
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return m.proxy.Stop(ctx)
+	if err := m.proxy.Stop(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("proxy shutdown: %w", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("shutdown errors: %v", errs)
+	}
+	return nil
 }
 
 // RegisterRoute adds a hostname → container routing entry via the reverse proxy.
@@ -103,4 +137,38 @@ func (m *LinuxNetworkManager) GetRoutes() map[string][]RouteTarget {
 // GetProxy returns the underlying reverse proxy for direct access (e.g., testing).
 func (m *LinuxNetworkManager) GetProxy() *ReverseProxy {
 	return m.proxy
+}
+
+// GetDNS returns the underlying DNS server for direct access (e.g., testing).
+func (m *LinuxNetworkManager) GetDNS() *DNSServer {
+	return m.dns
+}
+
+// RegisterAppDNS registers DNS records for an app.
+func (m *LinuxNetworkManager) RegisterAppDNS(appName string, ips []net.IP) {
+	if m.dns != nil {
+		m.dns.RegisterApp(appName, ips)
+	}
+}
+
+// DeregisterAppDNS removes DNS records for an app.
+func (m *LinuxNetworkManager) DeregisterAppDNS(appName string) {
+	if m.dns != nil {
+		m.dns.DeregisterApp(appName)
+	}
+}
+
+// LoadCustomCert loads a custom TLS certificate for a hostname.
+func (m *LinuxNetworkManager) LoadCustomCert(hostname, certPath, keyPath string) error {
+	return m.proxy.LoadCustomCert(hostname, certPath, keyPath)
+}
+
+// GetCustomCerts returns hostnames with custom certificates.
+func (m *LinuxNetworkManager) GetCustomCerts() []string {
+	return m.proxy.GetCustomCerts()
+}
+
+// IsTLSEnabled returns whether TLS is enabled on the proxy.
+func (m *LinuxNetworkManager) IsTLSEnabled() bool {
+	return m.proxy.IsTLSEnabled()
 }

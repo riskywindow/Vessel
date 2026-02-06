@@ -5,9 +5,9 @@
 
 ---
 
-## Current Phase: PHASE 3 — Networking & TLS
+## Current Phase: PHASE 4 — Health Monitoring & Reliability
 
-### Status: NOT STARTED (Phase 2 COMPLETE)
+### Status: NOT STARTED (Phase 3 COMPLETE)
 
 ---
 
@@ -104,26 +104,27 @@
 - [x] Implement `vessel init` — interactive config generator
 - [x] Implement `vessel fmt` — config validator
 
-## Phase 3: Networking & TLS (Weeks 8-9) — IN PROGRESS
+## Phase 3: Networking & TLS (Weeks 8-9) ✅ COMPLETE
 
 ### Week 8: Reverse Proxy and Routing
 - [x] Implement HTTP reverse proxy with host-based routing — COMPLETE (Session 10)
 - [x] Implement load balancing across instances (random selection) — COMPLETE (Session 10)
-- [ ] Implement WebSocket proxying
+- [ ] Implement WebSocket proxying (deferred to Phase 5)
 - [x] Implement container networking (bridge, veth pairs, NAT) — COMPLETE (Session 8: foundation, Session 9: lifecycle integration)
 - [x] Integrate networking into container lifecycle (deploy, stop, remove)
 - [x] Route registration/deregistration in deploy pipeline — COMPLETE (Session 10)
 - [x] `vessel network status` shows routes — COMPLETE (Session 10)
 - [x] `vessel network status` and `vessel network list` CLI commands
 - [x] `vessel ps` shows IP column
-- [ ] Implement internal DNS
+- [x] Implement internal DNS — COMPLETE (Session 11)
 
 ### Week 9: Automatic TLS
-- [ ] Implement ACME client for Let's Encrypt
-- [ ] Automatic certificate provisioning on deploy
-- [ ] Certificate renewal
-- [ ] HTTP → HTTPS redirect
-- [ ] Custom certificate support
+- [x] Implement ACME client for Let's Encrypt (autocert) — COMPLETE (Session 11)
+- [x] Automatic certificate provisioning on deploy — COMPLETE (Session 11)
+- [x] Certificate renewal (handled by autocert) — COMPLETE (Session 11)
+- [x] HTTP → HTTPS redirect — COMPLETE (Session 11)
+- [x] Custom certificate support — COMPLETE (Session 11)
+- [x] `vessel cert list` and `vessel cert import` CLI commands — COMPLETE (Session 11)
 
 ## Phase 4: Health Monitoring & Reliability (Week 10) — NOT STARTED
 - [ ] Implement HTTP health checks
@@ -605,4 +606,90 @@
 - NewHandler in socket.go now takes 5 args (added network.NetworkManager)
 
 **Next:**
-- Session 11: WebSocket proxying, internal DNS, or TLS
+- Session 11: TLS and internal DNS (final Phase 3 session)
+
+### Session 11 — 2026-02-06 ✅
+**Task:** Phase 3 Session 4 (Final) — TLS Support & Internal DNS
+
+**Completed:**
+- Implemented TLS support for reverse proxy (`internal/network/proxy.go`):
+  - `ProxyConfig` struct for TLS configuration (HTTPAddr, HTTPSAddr, TLSEnabled, ACMEEmail, CertDir)
+  - `NewReverseProxyWithTLS()` constructor with autocert manager
+  - ACME certificate management via `golang.org/x/crypto/acme/autocert`
+  - `hostPolicy()` restricts ACME certs to registered route hostnames
+  - `getCertificate()` checks custom certs first, falls back to ACME
+  - `LoadCustomCert()` for importing custom TLS certificates
+  - `StartTLS()` starts both HTTP and HTTPS servers
+  - HTTP server handles ACME challenges (/.well-known/acme-challenge/) and 301 redirects to HTTPS
+  - HTTPS server terminates TLS with MinVersion TLS 1.2
+  - `X-Forwarded-Proto` correctly set to "https" for TLS connections
+  - `IsTLSEnabled()`, `HasACME()`, `GetCustomCerts()` inspection methods
+
+- Implemented internal DNS server (`internal/network/dns.go`, ~195 lines):
+  - `DNSServer` with thread-safe record storage
+  - `RegisterApp()`: maps <app-name>.vessel.internal to container IPs
+  - `DeregisterApp()`: removes DNS records
+  - `Resolve()`: direct lookup for testing
+  - `handleDNS()`: processes DNS queries
+    - A record queries for .vessel.internal resolved locally
+    - NXDOMAIN for unknown .vessel.internal names
+    - External domains forwarded to upstream DNS (default 8.8.8.8:53)
+  - `Start()`/`Stop()`: UDP DNS server lifecycle
+  - Uses `github.com/miekg/dns` library
+  - Case-insensitive hostname matching
+  - 60-second TTL for internal records
+
+- Integrated DNS into NetworkManager (`internal/network/manager.go`):
+  - Added `DNSServer` field to `LinuxNetworkManager`
+  - DNS server starts on `10.88.0.1:53` (bridge gateway IP)
+  - `RegisterAppDNS()`/`DeregisterAppDNS()` methods
+  - `LoadCustomCert()`/`GetCustomCerts()`/`IsTLSEnabled()` delegations
+  - DNS server shut down gracefully on `Stop()`
+
+- Updated container init (`internal/runtime/init.go`):
+  - `/etc/resolv.conf` now points to `10.88.0.1` (Vessel DNS) as primary nameserver
+  - Falls back to `8.8.8.8` (Google DNS) as secondary
+  - `search vessel.internal` allows short names (e.g., `curl myapp`)
+
+- Integrated DNS registration into deploy pipeline (`internal/manager/deploy.go`):
+  - `registerAppDNS()`: collects container IPs, registers with DNS server
+  - `deregisterAppDNS()`: removes DNS records
+  - DNS registered after successful deploy (deployNewApp, deployRolling, deployBlueGreen)
+  - DNS deregistered on app removal (`RemoveApp`)
+
+- Created `vessel cert` CLI commands (`internal/cli/certs.go`):
+  - `vessel cert list`: shows TLS status, ACME config, loaded certificates
+  - `vessel cert import <hostname> --cert cert.pem --key key.pem`: imports custom certificates
+  - Both support `--json` output mode
+
+- Added daemon socket handlers (`internal/daemon/socket.go`):
+  - `cert.list`: returns TLS status and custom cert hostnames
+  - `cert.import`: loads custom certificate into reverse proxy
+
+- Wrote comprehensive test suite:
+  - `dns_test.go`: 12 tests (constructor, register/deregister, case-insensitive, resolve, isolation, overwrite, DNS query for internal A record, NXDOMAIN, multiple IPs, upstream forwarding, start/stop, stop nil)
+  - `proxy_test.go`: 13 new TLS tests (TLS constructor, no-ACME, custom cert load, invalid cert, getCertificate, no cert, host policy, forwarded proto HTTPS, HTTP→HTTPS redirect, health on TLS, stop both servers)
+  - Full integration: mock upstream DNS server for forwarding tests
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 7 packages pass
+- `go vet ./...` — clean
+- network: 60 tests (was 35, +12 DNS + 13 TLS)
+- config: 24, daemon: 10, manager: 64, runtime: 7, store: 26
+- **Total: ~191 tests across all packages**
+
+**Dependencies Added:**
+- `golang.org/x/crypto/acme/autocert` (autocert for ACME/Let's Encrypt)
+- `github.com/miekg/dns` (DNS server for internal service discovery)
+
+**Architecture Decisions:**
+- TLS uses autocert for automatic Let's Encrypt certificate provisioning
+- Custom certs checked first before ACME fallback (allows self-signed for dev)
+- DNS server runs on bridge gateway IP (10.88.0.1:53) — containers resolve via bridge
+- Container resolv.conf: primary=10.88.0.1 (Vessel), secondary=8.8.8.8 (Google), search=vessel.internal
+- DNS records updated after deploy success (not during deploy — avoids partial state)
+- App DNS deregistered on RemoveApp
+- WebSocket proxying deferred to Phase 5 (not in scope for Phase 3)
+
+**Phase 3 is COMPLETE. Next: Phase 4 — Health Monitoring & Reliability**

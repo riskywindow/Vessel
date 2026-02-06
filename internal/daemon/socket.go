@@ -103,6 +103,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleSecretDelete(ctx, conn, req.Params)
 	case "network.routes":
 		h.handleNetworkRoutes(ctx, conn)
+	case "cert.list":
+		h.handleCertList(ctx, conn)
+	case "cert.import":
+		h.handleCertImport(ctx, conn, req.Params)
 	case "ping":
 		h.writeData(conn, map[string]string{"status": "ok"})
 	default:
@@ -427,6 +431,53 @@ func (h *Handler) handleNetworkRoutes(ctx context.Context, conn net.Conn) {
 		return
 	}
 	h.writeData(conn, map[string][]network.RouteTarget{})
+}
+
+func (h *Handler) handleCertList(ctx context.Context, conn net.Conn) {
+	result := struct {
+		TLSEnabled bool     `json:"tls_enabled"`
+		ACME       bool     `json:"acme"`
+		Certs      []string `json:"certs"`
+	}{}
+
+	if h.network != nil {
+		if nm, ok := h.network.(*network.LinuxNetworkManager); ok {
+			result.TLSEnabled = nm.IsTLSEnabled()
+			result.Certs = nm.GetCustomCerts()
+		}
+	}
+
+	h.writeData(conn, result)
+}
+
+func (h *Handler) handleCertImport(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		Hostname string `json:"hostname"`
+		CertPath string `json:"cert_path"`
+		KeyPath  string `json:"key_path"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+
+	if h.network == nil {
+		h.writeError(conn, "NETWORK_UNAVAILABLE", "network manager not initialized")
+		return
+	}
+
+	nm, ok := h.network.(*network.LinuxNetworkManager)
+	if !ok {
+		h.writeError(conn, "NETWORK_UNAVAILABLE", "network manager does not support TLS")
+		return
+	}
+
+	if err := nm.LoadCustomCert(p.Hostname, p.CertPath, p.KeyPath); err != nil {
+		h.writeError(conn, "CERT_IMPORT_FAILED", err.Error())
+		return
+	}
+
+	h.writeData(conn, map[string]string{"status": "imported"})
 }
 
 // writeData sends a successful response.

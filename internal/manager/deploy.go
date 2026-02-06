@@ -129,6 +129,9 @@ func (m *AppManager) deployNewApp(ctx context.Context, appCfg *config.AppConfig,
 		m.registerContainerRoutes(c, appCfg)
 	}
 
+	// Register DNS for the app (best-effort)
+	m.registerAppDNS(appCfg, startedContainers)
+
 	// Success: update app and deploy
 	app.State = store.AppStateRunning
 	app.UpdatedAt = time.Now()
@@ -212,6 +215,9 @@ func (m *AppManager) deployRolling(ctx context.Context, app *store.App, appCfg *
 		}
 	}
 
+	// Update DNS records with new container IPs (best-effort)
+	m.registerAppDNS(appCfg, newContainers)
+
 	// Success
 	app.State = store.AppStateRunning
 	app.UpdatedAt = time.Now()
@@ -289,6 +295,9 @@ func (m *AppManager) deployBlueGreen(ctx context.Context, app *store.App, appCfg
 	for _, old := range oldContainers {
 		m.stopAndRemoveContainer(ctx, old)
 	}
+
+	// Update DNS records with new container IPs (best-effort)
+	m.registerAppDNS(appCfg, newContainers)
 
 	// Success
 	app.State = store.AppStateRunning
@@ -552,6 +561,44 @@ func ResolveSecretRefs(env map[string]string, sm *store.SecretManager) (map[stri
 		result[k] = resolved
 	}
 	return result, nil
+}
+
+// registerAppDNS registers DNS records for all running containers of an app.
+// This enables <app-name>.vessel.internal resolution for service discovery.
+func (m *AppManager) registerAppDNS(appCfg *config.AppConfig, containers []*store.Container) {
+	if m.network == nil {
+		return
+	}
+
+	// Collect IPs from running containers
+	var ips []net.IP
+	for _, c := range containers {
+		if c.IP != "" {
+			ip := net.ParseIP(c.IP)
+			if ip != nil {
+				ips = append(ips, ip)
+			}
+		}
+	}
+
+	if len(ips) == 0 {
+		return
+	}
+
+	// Access DNS registration if the network manager supports it
+	if nm, ok := m.network.(*network.LinuxNetworkManager); ok {
+		nm.RegisterAppDNS(appCfg.Name, ips)
+	}
+}
+
+// deregisterAppDNS removes DNS records for an app.
+func (m *AppManager) deregisterAppDNS(appName string) {
+	if m.network == nil {
+		return
+	}
+	if nm, ok := m.network.(*network.LinuxNetworkManager); ok {
+		nm.DeregisterAppDNS(appName)
+	}
 }
 
 // registerContainerRoutes registers reverse proxy routes for all configured domains.

@@ -2,11 +2,21 @@ package network
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -393,6 +403,297 @@ func TestProxy_StartStop(t *testing.T) {
 	if startErr != nil && startErr != http.ErrServerClosed {
 		t.Errorf("unexpected start error: %v", startErr)
 	}
+}
+
+func TestProxy_NewReverseProxyWithTLS(t *testing.T) {
+	cfg := ProxyConfig{
+		TLSEnabled: true,
+		ACMEEmail:  "admin@example.com",
+		CertDir:    t.TempDir(),
+	}
+	proxy := NewReverseProxyWithTLS(testLogger(), cfg)
+
+	if !proxy.IsTLSEnabled() {
+		t.Error("expected TLS to be enabled")
+	}
+	if !proxy.HasACME() {
+		t.Error("expected ACME to be configured")
+	}
+}
+
+func TestProxy_NewReverseProxyWithTLS_NoACME(t *testing.T) {
+	cfg := ProxyConfig{
+		TLSEnabled: true,
+	}
+	proxy := NewReverseProxyWithTLS(testLogger(), cfg)
+
+	if !proxy.IsTLSEnabled() {
+		t.Error("expected TLS to be enabled")
+	}
+	if proxy.HasACME() {
+		t.Error("expected ACME to NOT be configured (no email/certdir)")
+	}
+}
+
+func TestProxy_LoadCustomCert(t *testing.T) {
+	certDir := t.TempDir()
+	certPath, keyPath := generateSelfSignedCert(t, certDir, "test.local")
+
+	proxy := NewReverseProxy(testLogger())
+	if err := proxy.LoadCustomCert("test.local", certPath, keyPath); err != nil {
+		t.Fatalf("LoadCustomCert failed: %v", err)
+	}
+
+	certs := proxy.GetCustomCerts()
+	if len(certs) != 1 || certs[0] != "test.local" {
+		t.Errorf("expected [test.local], got %v", certs)
+	}
+}
+
+func TestProxy_LoadCustomCert_InvalidFiles(t *testing.T) {
+	proxy := NewReverseProxy(testLogger())
+	err := proxy.LoadCustomCert("test.local", "/nonexistent/cert.pem", "/nonexistent/key.pem")
+	if err == nil {
+		t.Error("expected error for non-existent cert files")
+	}
+}
+
+func TestProxy_GetCertificate_CustomCert(t *testing.T) {
+	certDir := t.TempDir()
+	certPath, keyPath := generateSelfSignedCert(t, certDir, "custom.local")
+
+	proxy := NewReverseProxy(testLogger())
+	proxy.LoadCustomCert("custom.local", certPath, keyPath)
+
+	hello := &tls.ClientHelloInfo{ServerName: "custom.local"}
+	cert, err := proxy.getCertificate(hello)
+	if err != nil {
+		t.Fatalf("getCertificate failed: %v", err)
+	}
+	if cert == nil {
+		t.Fatal("expected certificate, got nil")
+	}
+}
+
+func TestProxy_GetCertificate_NoCert(t *testing.T) {
+	proxy := NewReverseProxy(testLogger())
+	hello := &tls.ClientHelloInfo{ServerName: "unknown.local"}
+	_, err := proxy.getCertificate(hello)
+	if err == nil {
+		t.Error("expected error for unknown hostname")
+	}
+}
+
+func TestProxy_HostPolicy(t *testing.T) {
+	proxy := NewReverseProxy(testLogger())
+	proxy.RegisterRoute("allowed.example.com", RouteTarget{
+		ContainerID: "container-hp-123456",
+		IP:          net.ParseIP("10.88.0.2"),
+		Port:        80,
+	})
+
+	if err := proxy.hostPolicy(context.Background(), "allowed.example.com"); err != nil {
+		t.Errorf("expected no error for registered host, got: %v", err)
+	}
+
+	if err := proxy.hostPolicy(context.Background(), "denied.example.com"); err == nil {
+		t.Error("expected error for unregistered host")
+	}
+}
+
+func TestProxy_ForwardedProto_HTTPS(t *testing.T) {
+	var receivedProto string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedProto = r.Header.Get("X-Forwarded-Proto")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendHost := backend.Listener.Addr().String()
+	host, portStr, _ := net.SplitHostPort(backendHost)
+	port := 0
+	fmt.Sscanf(portStr, "%d", &port)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+
+	proxy := NewReverseProxy(testLogger())
+	proxy.RegisterRoute("secure.test", RouteTarget{
+		ContainerID: "container-sec-123456",
+		IP:          net.ParseIP(host),
+		Port:        port,
+	})
+
+	// Simulate HTTPS request (with TLS state set)
+	req := httptest.NewRequest("GET", "https://secure.test/", nil)
+	req.Host = "secure.test"
+	req.TLS = &tls.ConnectionState{} // Marks this as TLS
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if receivedProto != "https" {
+		t.Errorf("expected X-Forwarded-Proto=https, got %q", receivedProto)
+	}
+}
+
+func TestProxy_StartTLS_HTTPRedirect(t *testing.T) {
+	proxy := NewReverseProxyWithTLS(testLogger(), ProxyConfig{TLSEnabled: true})
+
+	// Get free ports
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	httpAddr := httpListener.Addr().String()
+	httpListener.Close()
+
+	httpsListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	httpsAddr := httpsListener.Addr().String()
+	httpsListener.Close()
+
+	if err := proxy.StartTLS(httpAddr, httpsAddr); err != nil {
+		t.Fatalf("StartTLS failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(ctx)
+	}()
+
+	// Test that HTTP returns redirect to HTTPS
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse // Don't follow redirects
+		},
+	}
+
+	req, _ := http.NewRequest("GET", "http://"+httpAddr+"/test", nil)
+	req.Host = "app.example.com"
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HTTP request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Errorf("expected 301, got %d", resp.StatusCode)
+	}
+
+	location := resp.Header.Get("Location")
+	if !strings.HasPrefix(location, "https://") {
+		t.Errorf("expected redirect to https://, got %q", location)
+	}
+}
+
+func TestProxy_StartTLS_HealthCheck(t *testing.T) {
+	proxy := NewReverseProxyWithTLS(testLogger(), ProxyConfig{TLSEnabled: true})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	httpAddr := listener.Addr().String()
+	listener.Close()
+
+	if err := proxy.StartTLS(httpAddr, ""); err != nil {
+		t.Fatalf("StartTLS failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(ctx)
+	}()
+
+	// Health check should still work on HTTP
+	resp, err := http.Get("http://" + httpAddr + "/__vessel/health")
+	if err != nil {
+		t.Fatalf("health check request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestProxy_StopBothServers(t *testing.T) {
+	proxy := NewReverseProxyWithTLS(testLogger(), ProxyConfig{TLSEnabled: true})
+
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	httpAddr := httpListener.Addr().String()
+	httpListener.Close()
+
+	proxy.StartTLS(httpAddr, "")
+	time.Sleep(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := proxy.Stop(ctx); err != nil {
+		t.Errorf("Stop failed: %v", err)
+	}
+}
+
+// generateSelfSignedCert generates a self-signed certificate for testing.
+func generateSelfSignedCert(t *testing.T, dir, hostname string) (certPath, keyPath string) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: hostname,
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{hostname},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+
+	certFile, err := os.Create(certPath)
+	if err != nil {
+		t.Fatalf("failed to create cert file: %v", err)
+	}
+	pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	certFile.Close()
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("failed to marshal key: %v", err)
+	}
+
+	keyFile, err := os.Create(keyPath)
+	if err != nil {
+		t.Fatalf("failed to create key file: %v", err)
+	}
+	pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	keyFile.Close()
+
+	return certPath, keyPath
 }
 
 func TestProxy_Integration_FullLifecycle(t *testing.T) {

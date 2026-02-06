@@ -173,6 +173,9 @@ func (m *AppManager) RemoveApp(ctx context.Context, appName string) error {
 		}
 	}
 
+	// Deregister DNS records
+	m.deregisterAppDNS(appName)
+
 	// Delete the app from the store
 	if err := m.store.DeleteApp(appName); err != nil {
 		return fmt.Errorf("failed to delete app: %w", err)

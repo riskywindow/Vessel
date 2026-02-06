@@ -240,8 +240,8 @@ func setupEtcFiles(hostname string) error {
 		return fmt.Errorf("failed to write /etc/hosts: %w", err)
 	}
 
-	// /etc/resolv.conf - use Google DNS as default
-	resolv := "nameserver 8.8.8.8\nnameserver 8.8.4.4\n"
+	// /etc/resolv.conf - use Vessel bridge DNS for service discovery, fallback to Google DNS
+	resolv := "nameserver 10.88.0.1\nnameserver 8.8.8.8\nsearch vessel.internal\n"
 	if err := os.WriteFile("/etc/resolv.conf", []byte(resolv), 0644); err != nil {
 		return fmt.Errorf("failed to write /etc/resolv.conf: %w", err)
 	}

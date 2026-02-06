@@ -702,11 +702,12 @@ Only use these dependencies. If you need something not on this list, document wh
 | go-containerregistry | OCI image operations | `github.com/google/go-containerregistry` |
 | lipgloss | Terminal styling | `github.com/charmbracelet/lipgloss` |
 | slog | Structured logging | `log/slog` (stdlib) |
-| certmagic | ACME/TLS automation | `github.com/caddyserver/certmagic` |
+| autocert | ACME/TLS automation | `golang.org/x/crypto/acme/autocert` |
 | golang.org/x/sys | Linux syscall wrappers | `golang.org/x/sys/unix` |
-| golang.org/x/crypto | Argon2id key derivation for secrets | `golang.org/x/crypto/argon2` |
+| golang.org/x/crypto | Argon2id + ACME autocert | `golang.org/x/crypto` |
 | google/uuid | UUID generation | `github.com/google/uuid` |
 | gorilla/websocket | WebSocket support | `github.com/gorilla/websocket` |
+| miekg/dns | Internal DNS server | `github.com/miekg/dns` |
 
 ### Rules for dependencies:
 - **Prefer stdlib** over third-party when the stdlib solution is adequate.
@@ -743,7 +744,7 @@ Every Claude Code session MUST follow this workflow:
 
 ## Current Phase
 
-**PHASE 3 — Networking & TLS** (Phase 0, 1, and 2 COMPLETE)
+**PHASE 4 — Health Monitoring & Reliability** (Phases 0, 1, 2, and 3 COMPLETE)
 
 See PROGRESS.md for detailed status.
 
@@ -775,3 +776,33 @@ See PROGRESS.md for detailed status.
 - Rolling: replace containers one at a time with drain timeout
 - Blue-Green: start all new, health check, atomic swap, remove old
 - Deploy-time health checks separate from continuous monitoring (Phase 4)
+
+### Container Networking (Phase 3)
+- Linux bridge `vessel0` with `10.88.0.0/16` subnet, gateway `10.88.0.1`
+- Veth pairs connect containers to bridge; host-side `veth-<8chars>`, container-side `eth0`
+- IP allocator: sequential allocation, persists to `/var/lib/vessel/network/allocations.json`
+- NAT via iptables MASQUERADE for outbound traffic
+- Network setup is best-effort (deploy succeeds even if networking fails)
+- Bridge persists across daemon restarts
+
+### Reverse Proxy (Phase 3)
+- Host-based routing using `net/http/httputil.NewSingleHostReverseProxy`
+- Random load balancing across multiple container backends
+- Routes registered after health check passes during deploy
+- Routes deregistered BEFORE network teardown on stop
+- Sets `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` headers
+
+### TLS (Phase 3)
+- Automatic TLS via `golang.org/x/crypto/acme/autocert`
+- Custom certificates checked first, ACME as fallback
+- `hostPolicy` restricts ACME certs to registered route hostnames only
+- HTTP server: health checks + ACME challenges + 301 redirect to HTTPS
+- HTTPS server: TLS 1.2 minimum, `GetCertificate` callback
+- `vessel cert list` / `vessel cert import` CLI commands
+
+### Internal DNS (Phase 3)
+- DNS server on `10.88.0.1:53` using `github.com/miekg/dns`
+- `<app-name>.vessel.internal` resolves to container IPs (A records, 60s TTL)
+- External queries forwarded to upstream DNS (default 8.8.8.8:53)
+- Container `/etc/resolv.conf`: primary=10.88.0.1, secondary=8.8.8.8, search=vessel.internal
+- DNS records updated after successful deploy; deregistered on app removal

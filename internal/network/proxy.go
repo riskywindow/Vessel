@@ -3,6 +3,7 @@ package network
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -10,24 +11,127 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/acme/autocert"
 )
+
+// ProxyConfig configures the reverse proxy.
+type ProxyConfig struct {
+	HTTPAddr   string // e.g., ":80"
+	HTTPSAddr  string // e.g., ":443"
+	TLSEnabled bool
+	ACMEEmail  string
+	CertDir    string // e.g., "/var/lib/vessel/tls"
+}
 
 // ReverseProxy routes incoming HTTP requests to containers by hostname.
 type ReverseProxy struct {
-	mu     sync.RWMutex
-	routes map[string][]RouteTarget
-	server *http.Server
-	logger *slog.Logger
+	mu          sync.RWMutex
+	routes      map[string][]RouteTarget
+	httpServer  *http.Server
+	httpsServer *http.Server
+	certManager *autocert.Manager
+	customCerts map[string]*tls.Certificate
+	logger      *slog.Logger
+	tlsEnabled  bool
 }
 
-// NewReverseProxy creates a new ReverseProxy.
+// NewReverseProxy creates a new ReverseProxy without TLS.
 func NewReverseProxy(logger *slog.Logger) *ReverseProxy {
 	return &ReverseProxy{
-		routes: make(map[string][]RouteTarget),
-		logger: logger,
+		routes:      make(map[string][]RouteTarget),
+		customCerts: make(map[string]*tls.Certificate),
+		logger:      logger,
 	}
+}
+
+// NewReverseProxyWithTLS creates a new ReverseProxy with TLS support.
+func NewReverseProxyWithTLS(logger *slog.Logger, cfg ProxyConfig) *ReverseProxy {
+	p := &ReverseProxy{
+		routes:      make(map[string][]RouteTarget),
+		customCerts: make(map[string]*tls.Certificate),
+		logger:      logger,
+		tlsEnabled:  cfg.TLSEnabled,
+	}
+
+	if cfg.TLSEnabled && cfg.ACMEEmail != "" && cfg.CertDir != "" {
+		p.certManager = &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			Email:      cfg.ACMEEmail,
+			Cache:      autocert.DirCache(cfg.CertDir),
+			HostPolicy: p.hostPolicy,
+		}
+	}
+
+	return p
+}
+
+// hostPolicy only allows certificates for registered routes.
+func (p *ReverseProxy) hostPolicy(_ context.Context, host string) error {
+	p.mu.RLock()
+	_, ok := p.routes[host]
+	p.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("host %s not in routes", host)
+	}
+	return nil
+}
+
+// getCertificate checks custom certs first, then falls back to ACME.
+func (p *ReverseProxy) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	p.mu.RLock()
+	if cert, ok := p.customCerts[hello.ServerName]; ok {
+		p.mu.RUnlock()
+		return cert, nil
+	}
+	p.mu.RUnlock()
+
+	if p.certManager != nil {
+		return p.certManager.GetCertificate(hello)
+	}
+
+	return nil, fmt.Errorf("no certificate for %s", hello.ServerName)
+}
+
+// LoadCustomCert loads a custom TLS certificate for a hostname.
+func (p *ReverseProxy) LoadCustomCert(hostname, certPath, keyPath string) error {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load certificate: %w", err)
+	}
+
+	p.mu.Lock()
+	p.customCerts[hostname] = &cert
+	p.mu.Unlock()
+
+	p.logger.Info("loaded custom certificate", "hostname", hostname)
+	return nil
+}
+
+// GetCustomCerts returns the hostnames that have custom certificates loaded.
+func (p *ReverseProxy) GetCustomCerts() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var hosts []string
+	for h := range p.customCerts {
+		hosts = append(hosts, h)
+	}
+	return hosts
+}
+
+// IsTLSEnabled returns whether TLS is enabled.
+func (p *ReverseProxy) IsTLSEnabled() bool {
+	return p.tlsEnabled
+}
+
+// HasACME returns whether ACME certificate management is configured.
+func (p *ReverseProxy) HasACME() bool {
+	return p.certManager != nil
 }
 
 // ServeHTTP implements http.Handler and dispatches requests to the correct backend.
@@ -71,7 +175,11 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Set forwarded headers for backends
 	r.Header.Set("X-Forwarded-Host", r.Host)
-	r.Header.Set("X-Forwarded-Proto", "http")
+	if r.TLS != nil {
+		r.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		r.Header.Set("X-Forwarded-Proto", "http")
+	}
 	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		r.Header.Set("X-Real-IP", clientIP)
 	} else {
@@ -159,9 +267,9 @@ func (p *ReverseProxy) GetRoutes() map[string][]RouteTarget {
 	return result
 }
 
-// Start begins serving HTTP traffic on the given address.
+// Start begins serving HTTP traffic on the given address (non-TLS mode).
 func (p *ReverseProxy) Start(addr string) error {
-	p.server = &http.Server{
+	p.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      p,
 		ReadTimeout:  30 * time.Second,
@@ -170,13 +278,99 @@ func (p *ReverseProxy) Start(addr string) error {
 	}
 
 	p.logger.Info("starting reverse proxy", "addr", addr)
-	return p.server.ListenAndServe()
+	return p.httpServer.ListenAndServe()
 }
 
-// Stop gracefully shuts down the proxy.
+// StartTLS starts both HTTP and HTTPS servers with TLS support.
+// The HTTP server handles ACME challenges and redirects to HTTPS.
+// The HTTPS server terminates TLS and proxies to backends.
+func (p *ReverseProxy) StartTLS(httpAddr, httpsAddr string) error {
+	// HTTP handler — serves ACME challenges, health checks, and redirects to HTTPS
+	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health check endpoint
+		if r.URL.Path == "/__vessel/health" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+			return
+		}
+
+		// ACME challenge
+		if p.certManager != nil && strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
+			p.certManager.HTTPHandler(nil).ServeHTTP(w, r)
+			return
+		}
+
+		// Redirect to HTTPS
+		if p.tlsEnabled && httpsAddr != "" {
+			target := "https://" + r.Host + r.URL.RequestURI()
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+
+		// Fallback to normal proxy
+		p.ServeHTTP(w, r)
+	})
+
+	p.httpServer = &http.Server{
+		Addr:         httpAddr,
+		Handler:      httpHandler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	errCh := make(chan error, 2)
+
+	go func() {
+		p.logger.Info("starting HTTP server", "addr", httpAddr)
+		if err := p.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			p.logger.Error("HTTP server error", "error", err)
+			errCh <- err
+		}
+	}()
+
+	if httpsAddr != "" {
+		tlsConfig := &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: p.getCertificate,
+		}
+
+		p.httpsServer = &http.Server{
+			Addr:         httpsAddr,
+			Handler:      p,
+			TLSConfig:    tlsConfig,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
+
+		go func() {
+			p.logger.Info("starting HTTPS server", "addr", httpsAddr)
+			if err := p.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				p.logger.Error("HTTPS server error", "error", err)
+				errCh <- err
+			}
+		}()
+	}
+
+	return nil
+}
+
+// Stop gracefully shuts down all servers.
 func (p *ReverseProxy) Stop(ctx context.Context) error {
-	if p.server != nil {
-		return p.server.Shutdown(ctx)
+	var errs []error
+	if p.httpServer != nil {
+		if err := p.httpServer.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("http shutdown: %w", err))
+		}
+	}
+	if p.httpsServer != nil {
+		if err := p.httpsServer.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("https shutdown: %w", err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("shutdown errors: %v", errs)
 	}
 	return nil
 }
