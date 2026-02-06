@@ -300,7 +300,7 @@ func (d *Daemon) acceptConnections(ctx context.Context) {
 func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.logger)
+	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.network, d.logger)
 	handler.Handle(ctx, conn)
 }
 

@@ -3,10 +3,12 @@ package manager
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
 	"time"
 
 	"github.com/vessel/vessel/internal/config"
+	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
 )
@@ -122,6 +124,9 @@ func (m *AppManager) deployNewApp(ctx context.Context, appCfg *config.AppConfig,
 		startedContainers = append(startedContainers, c)
 		m.logger.Info("instance healthy", "app", appCfg.Name, "container", c.ID[:12],
 			"instance", i+1, "of", appCfg.Instances)
+
+		// Register routes for each configured domain
+		m.registerContainerRoutes(c, appCfg)
 	}
 
 	// Success: update app and deploy
@@ -186,6 +191,9 @@ func (m *AppManager) deployRolling(ctx context.Context, app *store.App, appCfg *
 		newContainers = append(newContainers, newC)
 		m.logger.Info("rolling update: new instance healthy", "container", newC.ID[:12],
 			"instance", i+1, "of", appCfg.Instances)
+
+		// Register routes for the new container
+		m.registerContainerRoutes(newC, appCfg)
 
 		// Remove one old container (if available)
 		if i < len(oldContainers) {
@@ -268,8 +276,11 @@ func (m *AppManager) deployBlueGreen(ctx context.Context, app *store.App, appCfg
 			"instance", i+1, "of", appCfg.Instances)
 	}
 
-	// All new containers healthy — atomic swap
+	// All new containers healthy — atomic swap: register new routes
 	m.logger.Info("blue-green: all instances healthy, swapping traffic", "app", appCfg.Name)
+	for _, newC := range newContainers {
+		m.registerContainerRoutes(newC, appCfg)
+	}
 
 	// Wait drain timeout for in-flight requests to old containers
 	time.Sleep(drainTimeout)
@@ -416,7 +427,14 @@ func (m *AppManager) getRunningContainers(appID string) ([]*store.Container, err
 
 // stopAndRemoveContainer stops and removes a single container.
 func (m *AppManager) stopAndRemoveContainer(ctx context.Context, c *store.Container) {
-	// Teardown container networking first
+	// Deregister routes before teardown so proxy stops sending traffic
+	if m.network != nil {
+		if err := m.network.DeregisterRoute("", c.ID); err != nil {
+			m.logger.Warn("failed to deregister container routes", "container", c.ID[:12], "error", err)
+		}
+	}
+
+	// Teardown container networking
 	if m.network != nil {
 		if err := m.network.TeardownContainerNetwork(ctx, c.ID); err != nil {
 			m.logger.Warn("failed to teardown container network", "container", c.ID[:12], "error", err)
@@ -534,6 +552,31 @@ func ResolveSecretRefs(env map[string]string, sm *store.SecretManager) (map[stri
 		result[k] = resolved
 	}
 	return result, nil
+}
+
+// registerContainerRoutes registers reverse proxy routes for all configured domains.
+func (m *AppManager) registerContainerRoutes(c *store.Container, appCfg *config.AppConfig) {
+	if m.network == nil || len(appCfg.Domains) == 0 || c.IP == "" {
+		return
+	}
+
+	// Determine the container port to route to.
+	// Use the first port mapping's container port, or default to 80.
+	port := 80
+	if len(appCfg.Ports) > 0 {
+		port = appCfg.Ports[0].Container
+	}
+
+	for _, domain := range appCfg.Domains {
+		target := network.RouteTarget{
+			ContainerID: c.ID,
+			IP:          net.ParseIP(c.IP),
+			Port:        port,
+		}
+		if err := m.network.RegisterRoute(domain, target); err != nil {
+			m.logger.Warn("failed to register route", "domain", domain, "container", c.ID[:12], "error", err)
+		}
+	}
 }
 
 // configToResourceLimits converts a config.ResourceConfig to store.ResourceLimits.

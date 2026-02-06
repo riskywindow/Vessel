@@ -15,16 +15,25 @@ import (
 	"github.com/vessel/vessel/testutil"
 )
 
+// routeCall records a RegisterRoute or DeregisterRoute call.
+type routeCall struct {
+	Hostname    string
+	ContainerID string
+	Target      network.RouteTarget
+}
+
 // mockNetworkManager implements network.NetworkManager for testing.
 type mockNetworkManager struct {
 	setupFn    func(ctx context.Context, containerID string, pid int) (*network.ContainerNetwork, error)
 	teardownFn func(ctx context.Context, containerID string) error
 
-	mu             sync.Mutex
-	setupCalls     []string // container IDs
-	teardownCalls  []string // container IDs
-	allocatedIPs   map[string]net.IP
-	ipCounter      int
+	mu               sync.Mutex
+	setupCalls       []string // container IDs
+	teardownCalls    []string // container IDs
+	registerCalls    []routeCall
+	deregisterCalls  []routeCall
+	allocatedIPs     map[string]net.IP
+	ipCounter        int
 }
 
 func newMockNetworkManager() *mockNetworkManager {
@@ -68,10 +77,16 @@ func (m *mockNetworkManager) TeardownContainerNetwork(ctx context.Context, conta
 }
 
 func (m *mockNetworkManager) RegisterRoute(hostname string, target network.RouteTarget) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.registerCalls = append(m.registerCalls, routeCall{Hostname: hostname, Target: target})
 	return nil
 }
 
 func (m *mockNetworkManager) DeregisterRoute(hostname string, containerID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deregisterCalls = append(m.deregisterCalls, routeCall{Hostname: hostname, ContainerID: containerID})
 	return nil
 }
 
@@ -478,6 +493,221 @@ func TestListContainers_Empty(t *testing.T) {
 	}
 	if len(containers) != 0 {
 		t.Errorf("expected 0 containers, got %d", len(containers))
+	}
+}
+
+// --- Route Registration Tests ---
+
+func TestDeploy_RegistersRoutes_ForDomains(t *testing.T) {
+	rt := &mockRuntime{}
+	netMgr := newMockNetworkManager()
+	mgr, _ := newTestManagerWithNetwork(t, rt, netMgr)
+
+	appCfg := newTestAppConfig("route-app", "alpine:latest")
+	appCfg.Domains = []string{"app.example.com", "www.example.com"}
+	appCfg.Ports = []config.PortConfig{{Container: 8080}}
+
+	_, err := mgr.DeployAppFromConfig(context.Background(), appCfg)
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	netMgr.mu.Lock()
+	registerCount := len(netMgr.registerCalls)
+	calls := append([]routeCall{}, netMgr.registerCalls...)
+	netMgr.mu.Unlock()
+
+	// 1 container × 2 domains = 2 route registrations
+	if registerCount != 2 {
+		t.Fatalf("expected 2 RegisterRoute calls, got %d", registerCount)
+	}
+
+	hostnames := map[string]bool{}
+	for _, c := range calls {
+		hostnames[c.Hostname] = true
+		if c.Target.Port != 8080 {
+			t.Errorf("expected port 8080, got %d", c.Target.Port)
+		}
+	}
+	if !hostnames["app.example.com"] || !hostnames["www.example.com"] {
+		t.Errorf("expected both domains to be registered, got: %v", hostnames)
+	}
+}
+
+func TestDeploy_RegistersRoutes_DefaultPort(t *testing.T) {
+	rt := &mockRuntime{}
+	netMgr := newMockNetworkManager()
+	mgr, _ := newTestManagerWithNetwork(t, rt, netMgr)
+
+	appCfg := newTestAppConfig("default-port-app", "alpine:latest")
+	appCfg.Domains = []string{"test.local"}
+	// No ports configured — should default to 80
+
+	_, err := mgr.DeployAppFromConfig(context.Background(), appCfg)
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	netMgr.mu.Lock()
+	calls := append([]routeCall{}, netMgr.registerCalls...)
+	netMgr.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 RegisterRoute call, got %d", len(calls))
+	}
+	if calls[0].Target.Port != 80 {
+		t.Errorf("expected default port 80, got %d", calls[0].Target.Port)
+	}
+}
+
+func TestDeploy_NoDomains_NoRoutes(t *testing.T) {
+	rt := &mockRuntime{}
+	netMgr := newMockNetworkManager()
+	mgr, _ := newTestManagerWithNetwork(t, rt, netMgr)
+
+	appCfg := newTestAppConfig("no-domain-app", "alpine:latest")
+	// No domains configured
+
+	_, err := mgr.DeployAppFromConfig(context.Background(), appCfg)
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	netMgr.mu.Lock()
+	registerCount := len(netMgr.registerCalls)
+	netMgr.mu.Unlock()
+
+	if registerCount != 0 {
+		t.Errorf("expected 0 RegisterRoute calls when no domains, got %d", registerCount)
+	}
+}
+
+func TestDeploy_MultipleInstances_RegistersRoutePerInstance(t *testing.T) {
+	rt := &mockRuntime{}
+	netMgr := newMockNetworkManager()
+	mgr, _ := newTestManagerWithNetwork(t, rt, netMgr)
+
+	appCfg := newTestAppConfig("multi-route-app", "alpine:latest")
+	appCfg.Instances = 3
+	appCfg.Domains = []string{"multi.test"}
+
+	_, err := mgr.DeployAppFromConfig(context.Background(), appCfg)
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+
+	netMgr.mu.Lock()
+	registerCount := len(netMgr.registerCalls)
+	netMgr.mu.Unlock()
+
+	// 3 containers × 1 domain = 3 route registrations
+	if registerCount != 3 {
+		t.Errorf("expected 3 RegisterRoute calls, got %d", registerCount)
+	}
+}
+
+func TestRollingDeploy_RegistersNewRoutes(t *testing.T) {
+	rt := &mockRuntime{}
+	netMgr := newMockNetworkManager()
+	mgr, _ := newTestManagerWithNetwork(t, rt, netMgr)
+
+	// First deploy with domain
+	appCfg := newTestAppConfig("rolling-route", "alpine:v1")
+	appCfg.Domains = []string{"rolling.test"}
+	appCfg.Deploy.GracePeriod = config.Duration{Duration: 10 * time.Millisecond}
+	_, err := mgr.DeployAppFromConfig(context.Background(), appCfg)
+	if err != nil {
+		t.Fatalf("first deploy failed: %v", err)
+	}
+
+	// Rolling update
+	appCfg2 := newTestAppConfig("rolling-route", "alpine:v2")
+	appCfg2.Domains = []string{"rolling.test"}
+	appCfg2.Deploy.GracePeriod = config.Duration{Duration: 10 * time.Millisecond}
+	_, err = mgr.DeployAppFromConfig(context.Background(), appCfg2)
+	if err != nil {
+		t.Fatalf("rolling deploy failed: %v", err)
+	}
+
+	netMgr.mu.Lock()
+	registerCount := len(netMgr.registerCalls)
+	deregisterCount := len(netMgr.deregisterCalls)
+	netMgr.mu.Unlock()
+
+	// v1 registers 1 route, v2 registers 1 route = 2 total
+	if registerCount != 2 {
+		t.Errorf("expected 2 RegisterRoute calls, got %d", registerCount)
+	}
+	// Old container deregistered (empty hostname = all routes)
+	if deregisterCount < 1 {
+		t.Errorf("expected at least 1 DeregisterRoute call, got %d", deregisterCount)
+	}
+}
+
+func TestBlueGreenDeploy_RegistersNewRoutes(t *testing.T) {
+	rt := &mockRuntime{}
+	netMgr := newMockNetworkManager()
+	mgr, _ := newTestManagerWithNetwork(t, rt, netMgr)
+
+	// First deploy
+	appCfg := newTestAppConfig("bg-route", "alpine:v1")
+	appCfg.Domains = []string{"bg.test"}
+	appCfg.Deploy.GracePeriod = config.Duration{Duration: 10 * time.Millisecond}
+	_, err := mgr.DeployAppFromConfig(context.Background(), appCfg)
+	if err != nil {
+		t.Fatalf("first deploy failed: %v", err)
+	}
+
+	// Blue-green update
+	appCfg2 := newTestAppConfig("bg-route", "alpine:v2")
+	appCfg2.Domains = []string{"bg.test"}
+	appCfg2.Deploy.Strategy = "blue-green"
+	appCfg2.Deploy.GracePeriod = config.Duration{Duration: 10 * time.Millisecond}
+	_, err = mgr.DeployAppFromConfig(context.Background(), appCfg2)
+	if err != nil {
+		t.Fatalf("blue-green deploy failed: %v", err)
+	}
+
+	netMgr.mu.Lock()
+	registerCount := len(netMgr.registerCalls)
+	deregisterCount := len(netMgr.deregisterCalls)
+	netMgr.mu.Unlock()
+
+	// v1 registers 1, v2 registers 1 = 2 total
+	if registerCount != 2 {
+		t.Errorf("expected 2 RegisterRoute calls, got %d", registerCount)
+	}
+	// Old container deregistered
+	if deregisterCount < 1 {
+		t.Errorf("expected at least 1 DeregisterRoute call, got %d", deregisterCount)
+	}
+}
+
+func TestStopAndRemoveContainer_DeregistersRoutes(t *testing.T) {
+	rt := &mockRuntime{}
+	netMgr := newMockNetworkManager()
+	st := testutil.TempStore(t)
+	logger := testLogger()
+	mgr := NewAppManager(rt, st, netMgr, logger)
+
+	c := &store.Container{
+		ID:    "route-teardown-container-123",
+		AppID: "test-app",
+		Image: "alpine:latest",
+		State: store.ContainerStateRunning,
+		IP:    "10.88.0.5",
+	}
+	st.CreateContainer(c)
+
+	mgr.stopAndRemoveContainer(context.Background(), c)
+
+	netMgr.mu.Lock()
+	deregisterCount := len(netMgr.deregisterCalls)
+	netMgr.mu.Unlock()
+
+	// DeregisterRoute should be called with empty hostname (all routes)
+	if deregisterCount != 1 {
+		t.Errorf("expected 1 DeregisterRoute call, got %d", deregisterCount)
 	}
 }
 

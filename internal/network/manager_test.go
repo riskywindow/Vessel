@@ -20,11 +20,14 @@ func testManager(t *testing.T) *LinuxNetworkManager {
 		t.Fatalf("NewIPAllocator failed: %v", err)
 	}
 
+	proxy := NewReverseProxy(testLogger())
+
 	return &LinuxNetworkManager{
 		bridge:    NewBridgeNetwork("vessel-test", "10.88.0.1/16", testLogger()),
 		allocator: allocator,
-		routes:    make(map[string][]RouteTarget),
+		proxy:     proxy,
 		logger:    testLogger(),
+		proxyAddr: ":0",
 	}
 }
 
@@ -139,5 +142,19 @@ func TestGetRoutes_Isolation(t *testing.T) {
 	original := m.GetRoutes()
 	if len(original["example.com"]) != 1 {
 		t.Error("GetRoutes did not return an isolated copy")
+	}
+}
+
+func TestRegisterRoute_DuplicateIgnored(t *testing.T) {
+	m := testManager(t)
+
+	t1 := RouteTarget{ContainerID: "container-aaa-111", IP: net.ParseIP("10.88.0.2"), Port: 8080, Weight: 1}
+
+	m.RegisterRoute("example.com", t1)
+	m.RegisterRoute("example.com", t1) // Duplicate
+
+	routes := m.GetRoutes()
+	if len(routes["example.com"]) != 1 {
+		t.Errorf("expected 1 target (duplicate should be ignored), got %d", len(routes["example.com"]))
 	}
 }

@@ -107,11 +107,13 @@
 ## Phase 3: Networking & TLS (Weeks 8-9) — IN PROGRESS
 
 ### Week 8: Reverse Proxy and Routing
-- [ ] Implement HTTP reverse proxy with host-based routing
-- [ ] Implement load balancing across instances
+- [x] Implement HTTP reverse proxy with host-based routing — COMPLETE (Session 10)
+- [x] Implement load balancing across instances (random selection) — COMPLETE (Session 10)
 - [ ] Implement WebSocket proxying
 - [x] Implement container networking (bridge, veth pairs, NAT) — COMPLETE (Session 8: foundation, Session 9: lifecycle integration)
 - [x] Integrate networking into container lifecycle (deploy, stop, remove)
+- [x] Route registration/deregistration in deploy pipeline — COMPLETE (Session 10)
+- [x] `vessel network status` shows routes — COMPLETE (Session 10)
 - [x] `vessel network status` and `vessel network list` CLI commands
 - [x] `vessel ps` shows IP column
 - [ ] Implement internal DNS
@@ -544,3 +546,63 @@
 
 **Next:**
 - Session 10: HTTP reverse proxy with host-based routing
+
+### Session 10 — 2026-02-06 ✅
+**Task:** Phase 3 Session 3 — HTTP Reverse Proxy with Host-Based Routing
+
+**Completed:**
+- Implemented `internal/network/proxy.go` (~183 lines):
+  - `ReverseProxy` struct with thread-safe route table
+  - `ServeHTTP`: host-based routing, hostname port stripping, random load balancing
+  - `RegisterRoute`: adds container as backend with duplicate detection
+  - `DeregisterRoute`: removes by hostname or from all routes (empty hostname)
+  - `GetRoutes`: returns isolated copy of route table
+  - `Start`/`Stop`: HTTP server lifecycle with graceful shutdown
+  - Health check endpoint at `/__vessel/health`
+  - Sets `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` headers
+  - Custom error handler returns 502 on backend errors
+- Updated `internal/network/manager.go`:
+  - Added `ReverseProxy` field to `LinuxNetworkManager`
+  - `NewLinuxNetworkManagerWithProxy()` for custom proxy address
+  - `Start()` now starts proxy in background goroutine
+  - `Stop()` gracefully shuts down proxy with 10s timeout
+  - `RegisterRoute`/`DeregisterRoute` delegate to proxy (replaces stub)
+  - `GetRoutes()` delegates to proxy
+  - `GetProxy()` for direct test access
+- Integrated route registration into deploy pipeline (`internal/manager/deploy.go`):
+  - `registerContainerRoutes()`: registers all configured domains for a container
+  - Called after health check passes in `deployNewApp`, `deployRolling`, `deployBlueGreen`
+  - Uses first port mapping's container port, defaults to 80
+  - `stopAndRemoveContainer`: deregisters routes BEFORE network teardown
+- Added `network.routes` handler to daemon socket (`internal/daemon/socket.go`):
+  - Handler struct now accepts `network.NetworkManager`
+  - `NewHandler` takes 5 args (mgr, rt, sm, net, logger) — net can be nil
+  - `handleNetworkRoutes`: returns route table via socket protocol
+- Updated `vessel network status` CLI (`internal/cli/network.go`):
+  - Fetches routes from daemon via `network.routes` method
+  - Displays hostname → IP:port (container ID) table
+- Wrote comprehensive tests:
+  - `proxy_test.go`: 15 tests (health endpoint, unknown host 502, backend routing, forwarded headers, hostname port stripping, load balancing, deduplication, deregister by hostname/all, empty hostname cleanup, route isolation, backend error 502, concurrent access, start/stop lifecycle, full integration lifecycle)
+  - `network_test.go` updated: mockNetworkManager tracks register/deregister calls, +1 duplicate test
+  - `manager/network_test.go`: 8 new route tests (domain routes, default port, no domains, multi-instance, rolling routes, blue-green routes, deregister on stop)
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 6 packages pass
+- `go vet ./...` — clean
+- network: 35 tests (was 20, +15 new proxy tests)
+- manager: 64 tests (was 56, +8 new route tests)
+- config: 24, daemon: 10, runtime: 7, store: 26
+- **Total: ~166 tests across all packages**
+
+**Architecture Decisions:**
+- Reverse proxy uses `net/http/httputil.NewSingleHostReverseProxy` (stdlib)
+- Load balancing: random selection (simple, sufficient for single-node)
+- Route registration uses config `Domains []string` field
+- Container port determined from first `Ports[].Container` config, defaults to 80
+- Proxy starts on `:80` by default (configurable via `NewLinuxNetworkManagerWithProxy`)
+- Routes deregistered BEFORE network teardown in stop path
+- NewHandler in socket.go now takes 5 args (added network.NetworkManager)
+
+**Next:**
+- Session 11: WebSocket proxying, internal DNS, or TLS

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/vessel/vessel/internal/daemon"
+	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/store"
 )
 
@@ -85,6 +86,26 @@ func runNetworkStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Allocated IPs:  %d\n", ipCount)
 	fmt.Printf("Subnet:         10.88.0.0/16\n")
 	fmt.Printf("Gateway:        10.88.0.1\n")
+
+	// Fetch routes from daemon
+	var routes map[string][]network.RouteTarget
+	if err := client.Call("network.routes", nil, &routes); err != nil {
+		fmt.Println("\nRoutes:         error fetching")
+	} else {
+		fmt.Println("\nRoutes:")
+		if len(routes) == 0 {
+			fmt.Println("  (none)")
+		}
+		for hostname, targets := range routes {
+			for _, t := range targets {
+				shortID := t.ContainerID
+				if len(shortID) > 12 {
+					shortID = shortID[:12]
+				}
+				fmt.Printf("  %s → %s:%d (container %s)\n", hostname, t.IP, t.Port, shortID)
+			}
+		}
+	}
 
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/vessel/vessel/internal/config"
 	"github.com/vessel/vessel/internal/manager"
+	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
 )
@@ -38,15 +39,17 @@ type Handler struct {
 	manager       *manager.AppManager
 	runtime       runtime.Runtime
 	secretManager *store.SecretManager
+	network       network.NetworkManager
 	logger        *slog.Logger
 }
 
 // NewHandler creates a new request handler.
-func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, logger *slog.Logger) *Handler {
+func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, net network.NetworkManager, logger *slog.Logger) *Handler {
 	return &Handler{
 		manager:       mgr,
 		runtime:       rt,
 		secretManager: sm,
+		network:       net,
 		logger:        logger,
 	}
 }
@@ -98,6 +101,8 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleSecretList(ctx, conn)
 	case "secrets.delete":
 		h.handleSecretDelete(ctx, conn, req.Params)
+	case "network.routes":
+		h.handleNetworkRoutes(ctx, conn)
 	case "ping":
 		h.writeData(conn, map[string]string{"status": "ok"})
 	default:
@@ -410,6 +415,18 @@ func (h *Handler) handleSecretDelete(ctx context.Context, conn net.Conn, params 
 		return
 	}
 	h.writeData(conn, map[string]string{"status": "deleted"})
+}
+
+func (h *Handler) handleNetworkRoutes(ctx context.Context, conn net.Conn) {
+	if h.network == nil {
+		h.writeData(conn, map[string][]network.RouteTarget{})
+		return
+	}
+	if nm, ok := h.network.(*network.LinuxNetworkManager); ok {
+		h.writeData(conn, nm.GetRoutes())
+		return
+	}
+	h.writeData(conn, map[string][]network.RouteTarget{})
 }
 
 // writeData sends a successful response.
