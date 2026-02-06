@@ -33,6 +33,12 @@ var (
 	// TLSDir stores TLS certificates.
 	TLSDir = filepath.Join(RootDir, "tls")
 
+	// NetworkDir stores network state (IP allocations, etc.).
+	NetworkDir = filepath.Join(RootDir, "network")
+
+	// AllocationsPath is the path to the IP allocation persistence file.
+	AllocationsPath = filepath.Join(NetworkDir, "allocations.json")
+
 	// RunDir stores runtime files.
 	RunDir = filepath.Join(RootDir, "run")
 

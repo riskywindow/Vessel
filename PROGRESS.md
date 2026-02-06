@@ -104,13 +104,13 @@
 - [x] Implement `vessel init` — interactive config generator
 - [x] Implement `vessel fmt` — config validator
 
-## Phase 3: Networking & TLS (Weeks 8-9) — NOT STARTED
+## Phase 3: Networking & TLS (Weeks 8-9) — IN PROGRESS
 
 ### Week 8: Reverse Proxy and Routing
 - [ ] Implement HTTP reverse proxy with host-based routing
 - [ ] Implement load balancing across instances
 - [ ] Implement WebSocket proxying
-- [ ] Implement container networking (bridge, veth pairs, NAT)
+- [x] Implement container networking (bridge, veth pairs, NAT) — IN PROGRESS (Session 8: foundation)
 - [ ] Implement internal DNS
 
 ### Week 9: Automatic TLS
@@ -418,3 +418,67 @@
 - vessel init and vessel fmt moved from Phase 5 to Phase 2 Week 7
 
 **Phase 2 is COMPLETE. Next: Phase 3 — Networking & TLS**
+
+### Session 8 — 2026-02-06 ✅
+**Task:** Phase 3 Session 1 — Linux Bridge Network & IP Allocation
+
+**Completed:**
+- Added network path constants to `internal/paths/paths.go`:
+  - `NetworkDir` (/var/lib/vessel/network)
+  - `AllocationsPath` (/var/lib/vessel/network/allocations.json)
+- Added network sentinel errors to `internal/errors.go`:
+  - `ErrIPExhausted`, `ErrBridgeSetupFailed`, `ErrNetworkSetupFailed`, `ErrContainerIPNotFound`
+- Created `internal/network/network.go` (~50 lines):
+  - `NetworkManager` interface with 6 methods (SetupContainerNetwork, TeardownContainerNetwork, RegisterRoute, DeregisterRoute, Start, Stop)
+  - `ContainerNetwork` struct (IP, gateway, bridge, veth names)
+  - `RouteTarget` struct (container ID, IP, port, weight)
+- Created `internal/network/allocator.go` (~200 lines):
+  - `IPAllocator` with 10.88.0.0/16 subnet, gateway 10.88.0.1, starting at 10.88.0.2
+  - `Allocate()`: sequential allocation with idempotency, skips gateway
+  - `Release()`: returns IP to pool
+  - `GetIP()`: lookup by container ID
+  - `persist()`/`load()`: JSON persistence to disk
+  - `incrementIP()`: safe IP increment with carry
+- Created `internal/network/bridge.go` (~145 lines):
+  - `BridgeNetwork` struct with name/subnet/logger
+  - `Setup()`: create bridge, assign IP, bring up, enable IP forwarding, NAT masquerade, forwarding rules
+  - `Teardown()`: remove iptables rules, delete bridge
+  - `bridgeExists()`: checks /sys/class/net
+  - `setupNAT()`/`setupForwarding()`/`cleanupIPTables()`: iptables management
+- Created `internal/network/container.go` (~110 lines):
+  - `SetupContainerNetwork()`: allocate IP, create veth pair, attach to bridge, move to namespace via nsenter, configure IP/routes inside container
+  - `TeardownContainerNetwork()`: delete veth pair, release IP
+  - `GetContainerIP()`: lookup helper
+  - Full cleanup on failure at each step
+- Created `internal/network/manager.go` (~120 lines):
+  - `LinuxNetworkManager` implementing `NetworkManager` interface
+  - `NewLinuxNetworkManager()`: creates allocator, bridge, route table
+  - `Start()`: sets up bridge
+  - `Stop()`: no-op (bridge persists across restarts)
+  - `RegisterRoute()`/`DeregisterRoute()`: stub route table management for Session 3
+  - `GetRoutes()`: returns isolated copy of route table
+- Wrote comprehensive tests:
+  - `allocator_test.go`: 11 tests (new, sequential, gateway skip, idempotent, release/realloc, getIP, persistence, release nonexistent, no data path, incrementIP, gateway/subnet)
+  - `bridge_test.go`: 3 tests (not present, mock present via loopback, constructor)
+  - `manager_test.go`: 6 tests (register, multiple targets, deregister by hostname, remove empty, deregister all, isolation)
+  - `network_integration_test.go`: 3 integration tests (bridge setup/teardown, idempotent setup, manager start/stop) — require root
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 6 packages pass
+- `go vet ./...` — clean
+- network: 20 unit tests pass (+ 3 integration tests, require root)
+- config: 24, daemon: 10, manager: 44, runtime: 7, store: 26
+- **Total: ~131 unit tests across all packages**
+
+**Architecture Decisions:**
+- Bridge persists across daemon restarts (Stop() is a no-op for bridge)
+- IP allocator uses sequential allocation with wrap-around on subnet exhaustion
+- Container networking uses nsenter for in-namespace configuration (simpler than netlink)
+- Veth host-side name: "veth-" + first 8 chars of container ID
+- Container-side veth is always "eth0"
+- Route table is in-memory only (stub for Session 3 reverse proxy)
+
+**Next:**
+- Session 9: Integrate networking into container lifecycle (runtime + manager)
+- Session 10: HTTP reverse proxy with host-based routing

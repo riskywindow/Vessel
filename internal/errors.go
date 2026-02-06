@@ -26,8 +26,12 @@ var (
 	ErrConfigNotFound = errors.New("vessel.toml not found")
 
 	// Network errors
-	ErrPortConflict        = errors.New("port already in use")
-	ErrTLSProvisionFailed  = errors.New("failed to provision TLS certificate")
+	ErrPortConflict         = errors.New("port already in use")
+	ErrTLSProvisionFailed   = errors.New("failed to provision TLS certificate")
+	ErrIPExhausted          = errors.New("no available IPs in subnet")
+	ErrBridgeSetupFailed    = errors.New("failed to set up network bridge")
+	ErrNetworkSetupFailed   = errors.New("failed to set up container network")
+	ErrContainerIPNotFound  = errors.New("no IP allocated for container")
 
 	// Store errors
 	ErrStoreCorrupted = errors.New("data store corrupted")
