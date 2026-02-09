@@ -91,13 +91,16 @@ func NewDaemon(logger *slog.Logger) (*Daemon, error) {
 	// Create auto-restarter (manager set below to avoid circular init)
 	restarter := health.NewAutoRestarter(st, nil, logger)
 
+	// Create alerter (nil — can be configured via config)
+	var alerter *health.Alerter
+
 	// Create health monitor
 	healthCfg := health.HealthMonitorConfig{
 		CheckInterval:      10 * time.Second,
 		UnhealthyThreshold: 3,
 		HealthyThreshold:   1,
 	}
-	healthMonitor := health.NewHealthMonitor(rt, st, restarter, healthCfg, logger)
+	healthMonitor := health.NewHealthMonitor(rt, st, restarter, alerter, healthCfg, logger)
 
 	// Create metrics collector
 	metricsCollector := health.NewMetricsCollector(
@@ -368,7 +371,7 @@ func (d *Daemon) acceptConnections(ctx context.Context) {
 func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.network, d.healthMonitor, d.metricsCollector, d.logger)
+	handler := NewHandler(d.manager, d.runtime, d.store, d.secretManager, d.network, d.healthMonitor, d.metricsCollector, d.logger)
 	handler.Handle(ctx, conn)
 }
 

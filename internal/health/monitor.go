@@ -61,6 +61,7 @@ type HealthMonitor struct {
 	runtime    runtime.Runtime
 	store      store.Store
 	restarter  *AutoRestarter
+	alerter    *Alerter
 	config     HealthMonitorConfig
 	logger     *slog.Logger
 
@@ -75,7 +76,7 @@ type HealthMonitor struct {
 }
 
 // NewHealthMonitor creates a new HealthMonitor.
-func NewHealthMonitor(rt runtime.Runtime, st store.Store, restarter *AutoRestarter, cfg HealthMonitorConfig, logger *slog.Logger) *HealthMonitor {
+func NewHealthMonitor(rt runtime.Runtime, st store.Store, restarter *AutoRestarter, alerter *Alerter, cfg HealthMonitorConfig, logger *slog.Logger) *HealthMonitor {
 	if cfg.CheckInterval <= 0 {
 		cfg.CheckInterval = 10 * time.Second
 	}
@@ -91,6 +92,7 @@ func NewHealthMonitor(rt runtime.Runtime, st store.Store, restarter *AutoRestart
 		runtime:     rt,
 		store:       st,
 		restarter:   restarter,
+		alerter:     alerter,
 		config:      cfg,
 		logger:      logger,
 		subscribers: make([]chan HealthEvent, 0),
@@ -314,7 +316,7 @@ func (m *HealthMonitor) checkContainer(mc *monitoredContainer) {
 	}
 }
 
-// emitEvent sends a health event to all subscribers.
+// emitEvent sends a health event to all subscribers and the alerter.
 func (m *HealthMonitor) emitEvent(event HealthEvent) {
 	m.subMu.RLock()
 	defer m.subMu.RUnlock()
@@ -325,6 +327,11 @@ func (m *HealthMonitor) emitEvent(event HealthEvent) {
 		default:
 			m.logger.Warn("dropping health event, subscriber channel full")
 		}
+	}
+
+	// Send alert via webhook
+	if m.alerter != nil {
+		go m.alerter.HandleHealthEvent(m.ctx, event)
 	}
 }
 

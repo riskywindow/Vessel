@@ -22,9 +22,37 @@ Otherwise, shows a summary for all monitored containers.
 
 Examples:
   vessel health              # Summary for all monitored containers
-  vessel health myapp        # Detailed health for 'myapp'`,
+  vessel health myapp        # Detailed health for 'myapp'
+  vessel health check <id>   # Run immediate health check
+  vessel health history <id> # Show health check history`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runHealth,
+}
+
+var healthCheckCmd = &cobra.Command{
+	Use:   "check <container-id>",
+	Short: "Run an immediate health check on a container",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runHealthCheck,
+}
+
+var healthHistoryCmd = &cobra.Command{
+	Use:   "history <container-id>",
+	Short: "Show health check history for a container",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runHealthHistory,
+}
+
+var healthWatchCmd = &cobra.Command{
+	Use:   "watch",
+	Short: "Watch health status continuously",
+	RunE:  runHealthWatch,
+}
+
+func init() {
+	healthCmd.AddCommand(healthCheckCmd)
+	healthCmd.AddCommand(healthHistoryCmd)
+	healthCmd.AddCommand(healthWatchCmd)
 }
 
 func runHealth(cmd *cobra.Command, args []string) error {
@@ -98,7 +126,7 @@ func showAppHealth(client *daemon.Client, appName string) error {
 	}
 
 	type containerHealthInfo struct {
-		Container *store.Container        `json:"container"`
+		Container *store.Container       `json:"container"`
 		Health    *health.ContainerHealth `json:"health,omitempty"`
 	}
 
@@ -155,4 +183,119 @@ func showAppHealth(client *daemon.Client, appName string) error {
 	}
 
 	return nil
+}
+
+func runHealthCheck(cmd *cobra.Command, args []string) error {
+	containerID := args[0]
+
+	client := daemon.NewClient("")
+
+	var result store.HealthResult
+	if err := client.Call("health.check_now", map[string]string{"container_id": containerID}, &result); err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(data))
+		return nil
+	}
+
+	shortID := containerID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+
+	fmt.Printf("Container: %s\n", shortID)
+	fmt.Printf("Status:    %s\n", result.Status)
+	fmt.Printf("Duration:  %v\n", result.Duration.Round(time.Millisecond))
+	if result.Message != "" {
+		fmt.Printf("Message:   %s\n", result.Message)
+	}
+
+	return nil
+}
+
+func runHealthHistory(cmd *cobra.Command, args []string) error {
+	containerID := args[0]
+
+	client := daemon.NewClient("")
+
+	var results []*store.HealthResult
+	if err := client.Call("health.history", map[string]interface{}{
+		"container_id": containerID,
+		"limit":        20,
+	}, &results); err != nil {
+		return fmt.Errorf("failed to get health history: %w", err)
+	}
+
+	if len(results) == 0 {
+		fmt.Println("No health check history found.")
+		return nil
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(results, "", "  ")
+		fmt.Println(string(data))
+		return nil
+	}
+
+	shortID := containerID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+
+	fmt.Printf("Health history for container %s:\n\n", shortID)
+	fmt.Printf("%-20s %-12s %-12s %s\n", "TIME", "STATUS", "DURATION", "MESSAGE")
+	fmt.Println(strings.Repeat("-", 70))
+
+	for _, r := range results {
+		statusStr := string(r.Status)
+
+		msg := r.Message
+		if len(msg) > 30 {
+			msg = msg[:27] + "..."
+		}
+
+		fmt.Printf("%-20s %-12s %-12s %s\n",
+			r.CheckedAt.Format("15:04:05"),
+			statusStr,
+			r.Duration.Round(time.Millisecond).String(),
+			msg,
+		)
+	}
+
+	return nil
+}
+
+func runHealthWatch(cmd *cobra.Command, args []string) error {
+	client := daemon.NewClient("")
+
+	fmt.Println("Watching health status (Ctrl+C to stop)...")
+	fmt.Println()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		// Clear screen and redraw
+		fmt.Print("\033[H\033[2J")
+		fmt.Printf("Health Status (updated %s)\n\n", time.Now().Format("15:04:05"))
+		if err := showAllHealth(client); err != nil {
+			fmt.Printf("Error: %v\n", err)
+		}
+
+		<-ticker.C
+	}
+}
+
+// humanDuration formats a duration into a human-readable string.
+func humanDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
 }

@@ -11,8 +11,26 @@ type Config struct {
 	APIAddress string `toml:"api_address" json:"api_address"`
 	APIPort    int    `toml:"api_port" json:"api_port"`
 
+	// Alerting configures webhook alerting for health status changes.
+	Alerting AlertingConfig `toml:"alerting" json:"alerting"`
+
 	// Apps is a list of application configurations.
 	Apps []AppConfig `toml:"app" json:"apps"`
+}
+
+// AlertingConfig configures webhook alerting behavior.
+type AlertingConfig struct {
+	// Enabled controls whether webhook alerting is active.
+	Enabled bool `toml:"enabled" json:"enabled"`
+
+	// WebhookURL is the endpoint to POST alert payloads to.
+	WebhookURL string `toml:"webhook_url" json:"webhook_url"`
+
+	// MinInterval is the minimum time between alerts for the same container.
+	MinInterval Duration `toml:"min_interval" json:"min_interval"`
+
+	// IncludeRecovers controls whether recovery alerts are sent.
+	IncludeRecovers bool `toml:"include_recovers" json:"include_recovers"`
 }
 
 // AppConfig represents a single application definition in vessel.toml.

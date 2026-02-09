@@ -158,7 +158,7 @@ func TestDeploy_RegistersWithHealthMonitor(t *testing.T) {
 	mgr := NewAppManager(rt, st, nil, testLogger())
 
 	// Create a health monitor and wire it
-	hm := health.NewHealthMonitor(rt, st, nil, health.HealthMonitorConfig{
+	hm := health.NewHealthMonitor(rt, st, nil, nil, health.HealthMonitorConfig{
 		CheckInterval:      time.Hour, // Long interval, we don't want checks in this test
 		UnhealthyThreshold: 3,
 		HealthyThreshold:   1,
@@ -189,7 +189,7 @@ func TestDeploy_DeregistersOnStop(t *testing.T) {
 	rt := &mockRuntime{}
 	mgr := NewAppManager(rt, st, nil, testLogger())
 
-	hm := health.NewHealthMonitor(rt, st, nil, health.HealthMonitorConfig{
+	hm := health.NewHealthMonitor(rt, st, nil, nil, health.HealthMonitorConfig{
 		CheckInterval: time.Hour,
 	}, testLogger())
 	mgr.SetHealthMonitor(hm)
@@ -224,7 +224,7 @@ func TestRestartContainer_ReregistersWithHealthMonitor(t *testing.T) {
 	rt := &mockRuntime{}
 	mgr := NewAppManager(rt, st, nil, testLogger())
 
-	hm := health.NewHealthMonitor(rt, st, nil, health.HealthMonitorConfig{
+	hm := health.NewHealthMonitor(rt, st, nil, nil, health.HealthMonitorConfig{
 		CheckInterval: time.Hour,
 	}, testLogger())
 	mgr.SetHealthMonitor(hm)
@@ -283,7 +283,7 @@ func TestRollingDeploy_RegistersWithHealthMonitor(t *testing.T) {
 	rt := &mockRuntime{}
 	mgr := NewAppManager(rt, st, nil, testLogger())
 
-	hm := health.NewHealthMonitor(rt, st, nil, health.HealthMonitorConfig{
+	hm := health.NewHealthMonitor(rt, st, nil, nil, health.HealthMonitorConfig{
 		CheckInterval: time.Hour,
 	}, testLogger())
 	mgr.SetHealthMonitor(hm)
@@ -316,7 +316,7 @@ func TestBlueGreenDeploy_RegistersWithHealthMonitor(t *testing.T) {
 	rt := &mockRuntime{}
 	mgr := NewAppManager(rt, st, nil, testLogger())
 
-	hm := health.NewHealthMonitor(rt, st, nil, health.HealthMonitorConfig{
+	hm := health.NewHealthMonitor(rt, st, nil, nil, health.HealthMonitorConfig{
 		CheckInterval: time.Hour,
 	}, testLogger())
 	mgr.SetHealthMonitor(hm)
@@ -367,7 +367,7 @@ func TestEndToEnd_HealthMonitorRestartsUnhealthy(t *testing.T) {
 		UnhealthyThreshold: 2,
 		HealthyThreshold:   1,
 	}
-	hm := health.NewHealthMonitor(rt, st, restarter, hmCfg, testLogger())
+	hm := health.NewHealthMonitor(rt, st, restarter, nil, hmCfg, testLogger())
 	mgr.SetHealthMonitor(hm)
 
 	// Deploy an app

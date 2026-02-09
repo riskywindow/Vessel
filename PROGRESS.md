@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 4 — Health Monitoring & Reliability
 
-### Status: IN PROGRESS (Sessions 1-2 COMPLETE — Health Monitor, Auto-Restart, Resource Metrics)
+### Status: COMPLETE (Sessions 1-3 COMPLETE — Health Monitor, Auto-Restart, Resource Metrics, Webhook Alerting)
 
 ---
 
@@ -126,7 +126,7 @@
 - [x] Custom certificate support — COMPLETE (Session 11)
 - [x] `vessel cert list` and `vessel cert import` CLI commands — COMPLETE (Session 11)
 
-## Phase 4: Health Monitoring & Reliability (Week 10) — IN PROGRESS
+## Phase 4: Health Monitoring & Reliability (Week 10) — COMPLETE
 ### Session 1: Continuous Health Monitor & Auto-Restart ✅
 - [x] Implement HTTP health checks (shared in health/checker.go)
 - [x] Implement TCP health checks (shared in health/checker.go)
@@ -147,8 +147,19 @@
 - [x] Updated `vessel stats` with NET RX/TX columns, metrics.latest fallback
 - [x] Implemented `vessel health` CLI command (summary + per-app detail)
 - [x] 25 new tests (18 health/metrics + 7 manager/metrics)
-### Remaining
-- [ ] Webhook alerting
+### Session 3: Webhook Alerting & CLI Enhancements ✅
+- [x] Webhook alerter (health/alerter.go) with rate limiting
+- [x] AlertConfig, Alert types with JSON payload
+- [x] Rate limiting per container (configurable MinInterval, default 5m)
+- [x] Recovery alert support (configurable IncludeRecovers)
+- [x] Alerter integration with health monitor (emitEvent calls alerter)
+- [x] AlertingConfig added to config types (vessel.toml [alerting] section)
+- [x] `vessel health check <container-id>` — immediate health check
+- [x] `vessel health history <container-id>` — health check history
+- [x] `vessel health watch` — continuous health status display
+- [x] Socket handlers: health.check_now, health.history
+- [x] Store reference added to socket Handler for health history queries
+- [x] 15 new tests (alerter unit tests + monitor integration)
 
 ## Phase 5: CLI Polish & Remote Deploy (Week 11) — NOT STARTED
 - [ ] Styled terminal output (lipgloss)
@@ -885,4 +896,74 @@
 - Network Rx/Tx metrics are 0 for now (would need /proc/net/dev parsing inside container namespace)
 
 **Next:**
-- Phase 4 Session 3: Webhook alerting (final remaining Phase 4 item)
+- Phase 5: CLI Polish & Remote Deploy
+
+### Session 14 — 2026-02-09 ✅
+**Task:** Phase 4 Session 3 (Final) — Webhook Alerting & CLI Enhancements
+
+**Completed:**
+- Implemented webhook alerter (`internal/health/alerter.go`, ~120 lines):
+  - `AlertConfig` struct: WebhookURL, Enabled, MinInterval, IncludeRecovers
+  - `Alert` struct: Type, AppID, ContainerID, Message, Timestamp
+  - `Alerter` with HTTP POST to webhook endpoint
+  - Rate limiting per container (default 5m between alerts for same container)
+  - Recovery alerts configurable (IncludeRecovers flag)
+  - `HandleHealthEvent()`: converts HealthEvent to Alert and sends
+  - JSON payload with Content-Type and User-Agent headers
+- Integrated alerter with HealthMonitor (`internal/health/monitor.go`):
+  - Added `alerter *Alerter` field to HealthMonitor struct
+  - Updated `NewHealthMonitor()` to accept alerter parameter (can be nil)
+  - `emitEvent()` now calls `alerter.HandleHealthEvent()` asynchronously
+  - Updated all callers: daemon.go, health_test.go (11 calls), manager/health_test.go (7 calls)
+- Added AlertingConfig to config types (`internal/config/types.go`):
+  - `AlertingConfig` struct: Enabled, WebhookURL, MinInterval, IncludeRecovers
+  - Added `Alerting AlertingConfig` field to `Config` struct
+  - Supports `[alerting]` TOML section in vessel.toml
+- Added health subcommands (`internal/cli/health.go`):
+  - `vessel health check <container-id>`: runs immediate health check, shows result
+  - `vessel health history <container-id>`: shows last 20 health check results
+  - `vessel health watch`: continuous 2s refresh of all health statuses
+  - `humanDuration()` helper for formatting durations
+  - All subcommands support `--json` output mode
+- Added socket handlers (`internal/daemon/socket.go`):
+  - `health.check_now`: executes immediate health check using monitor's config
+  - `health.history`: returns health results from store (with configurable limit)
+  - Added `store.Store` field to Handler for health history queries
+  - `NewHandler` now takes 8 args (added Store parameter)
+- Wrote comprehensive test suite (15 new tests):
+  - `TestAlerter_NewAlerter_Defaults`: verifies default 5m min interval
+  - `TestAlerter_SendAlert_Disabled`: disabled alerter returns nil
+  - `TestAlerter_SendAlert_EmptyURL`: empty URL returns nil
+  - `TestAlerter_SendAlert_Success`: verifies payload, headers, Content-Type
+  - `TestAlerter_SendAlert_WebhookError`: 500 response returns error
+  - `TestAlerter_RateLimiting`: second alert for same container rate-limited
+  - `TestAlerter_RecoveryAlerts_Disabled`: skips recovery when disabled
+  - `TestAlerter_RecoveryAlerts_Enabled`: sends recovery when enabled
+  - `TestAlerter_HandleHealthEvent_Unhealthy`: unhealthy event triggers alert
+  - `TestAlerter_HandleHealthEvent_Recovered`: recovery event triggers alert
+  - `TestAlerter_HandleHealthEvent_InitialHealthy_Ignored`: initial healthy ignored
+  - `TestAlerter_HandleHealthEvent_UnknownStatus_Ignored`: unknown status ignored
+  - `TestAlerter_MonitorIntegration`: end-to-end monitor→alerter→webhook
+  - `TestHumanDuration`: duration formatting
+  - All tests use httptest.Server for mock webhook endpoints
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 8 packages pass
+- `go vet ./...` — clean
+- health: 62 tests (was 47, +15 new alerter tests)
+- manager: 83 tests
+- config: 26, daemon: 10, network: 60, runtime: 7, store: 27
+- **Total: ~275 tests across all packages**
+
+**Architecture Decisions:**
+- Alerter is a standalone component, injected into HealthMonitor (nil-safe)
+- Alerts sent asynchronously via goroutine in emitEvent (doesn't block monitor)
+- Rate limiting uses per-container map with configurable MinInterval
+- Recovery alerts only sent for unhealthy→healthy transitions (not initial healthy)
+- health.check_now uses the container's registered health check config from monitor
+- health.history reads directly from store (store reference added to Handler)
+- NewHandler in socket.go now takes 8 args (added Store)
+- AlertingConfig in vessel.toml via [alerting] section
+
+**Phase 4 is COMPLETE. Next: Phase 5 — CLI Polish & Remote Deploy**

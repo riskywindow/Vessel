@@ -39,6 +39,7 @@ type ErrorResponse struct {
 type Handler struct {
 	manager          *manager.AppManager
 	runtime          runtime.Runtime
+	store            store.Store
 	secretManager    *store.SecretManager
 	network          network.NetworkManager
 	healthMonitor    *health.HealthMonitor
@@ -47,10 +48,11 @@ type Handler struct {
 }
 
 // NewHandler creates a new request handler.
-func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, net network.NetworkManager, hm *health.HealthMonitor, mc *health.MetricsCollector, logger *slog.Logger) *Handler {
+func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, st store.Store, sm *store.SecretManager, net network.NetworkManager, hm *health.HealthMonitor, mc *health.MetricsCollector, logger *slog.Logger) *Handler {
 	return &Handler{
 		manager:          mgr,
 		runtime:          rt,
+		store:            st,
 		secretManager:    sm,
 		network:          net,
 		healthMonitor:    hm,
@@ -112,6 +114,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleHealthStatus(ctx, conn, req.Params)
 	case "health.all":
 		h.handleHealthAll(ctx, conn)
+	case "health.check_now":
+		h.handleHealthCheckNow(ctx, conn, req.Params)
+	case "health.history":
+		h.handleHealthHistory(ctx, conn, req.Params)
 	case "metrics.get":
 		h.handleMetricsGet(ctx, conn, req.Params)
 	case "metrics.latest":
@@ -479,6 +485,78 @@ func (h *Handler) handleHealthAll(ctx context.Context, conn net.Conn) {
 	}
 
 	h.writeData(conn, h.healthMonitor.GetAllStatus())
+}
+
+func (h *Handler) handleHealthCheckNow(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		ContainerID string `json:"container_id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+
+	if h.healthMonitor == nil {
+		h.writeError(conn, "HEALTH_UNAVAILABLE", "health monitor not initialized")
+		return
+	}
+
+	// Get the container's health check config from the monitor
+	status, err := h.healthMonitor.GetStatus(p.ContainerID)
+	if err != nil {
+		h.writeError(conn, "HEALTH_FAILED", err.Error())
+		return
+	}
+	if status == nil {
+		h.writeError(conn, "NOT_MONITORED", "container not being monitored")
+		return
+	}
+
+	// Execute an immediate health check
+	start := time.Now()
+	checkErr := health.ExecuteCheck(ctx, h.runtime, p.ContainerID, status.Check)
+
+	result := store.HealthResult{
+		ContainerID: p.ContainerID,
+		CheckedAt:   start,
+		Duration:    time.Since(start),
+	}
+	if checkErr != nil {
+		result.Status = store.HealthStatusUnhealthy
+		result.Message = checkErr.Error()
+	} else {
+		result.Status = store.HealthStatusHealthy
+		result.Message = "healthy"
+	}
+
+	h.writeData(conn, result)
+}
+
+func (h *Handler) handleHealthHistory(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		ContainerID string `json:"container_id"`
+		Limit       int    `json:"limit"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	if p.Limit <= 0 {
+		p.Limit = 20
+	}
+
+	if h.store == nil {
+		h.writeError(conn, "STORE_UNAVAILABLE", "store not initialized")
+		return
+	}
+
+	results, err := h.store.GetHealthResults(p.ContainerID, p.Limit)
+	if err != nil {
+		h.writeError(conn, "HEALTH_FAILED", err.Error())
+		return
+	}
+
+	h.writeData(conn, results)
 }
 
 func (h *Handler) handleCertList(ctx context.Context, conn net.Conn) {

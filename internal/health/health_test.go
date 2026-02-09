@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -161,7 +162,7 @@ func TestExecuteCheck_Dispatch(t *testing.T) {
 func TestMonitor_RegisterDeregister(t *testing.T) {
 	rt := &mockRuntime{}
 	st := testutil.TempStore(t)
-	mon := NewHealthMonitor(rt, st, nil, HealthMonitorConfig{}, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, HealthMonitorConfig{}, testLogger())
 
 	containerID := "test-container-123456"
 	check := store.HealthCheck{
@@ -198,7 +199,7 @@ func TestMonitor_RegisterDeregister(t *testing.T) {
 func TestMonitor_GetAllStatus(t *testing.T) {
 	rt := &mockRuntime{}
 	st := testutil.TempStore(t)
-	mon := NewHealthMonitor(rt, st, nil, HealthMonitorConfig{}, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, HealthMonitorConfig{}, testLogger())
 
 	check := store.HealthCheck{Type: store.HealthCheckCommand, Target: "true", Timeout: 5 * time.Second}
 	mon.RegisterContainer("container-aaaaaa-111111", "app-1", check)
@@ -222,7 +223,7 @@ func TestMonitor_UnhealthyThreshold(t *testing.T) {
 		UnhealthyThreshold: 3,
 		HealthyThreshold:   1,
 	}
-	mon := NewHealthMonitor(rt, st, nil, cfg, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, cfg, testLogger())
 
 	containerID := "test-container-unhealthy"
 	check := store.HealthCheck{
@@ -257,7 +258,7 @@ func TestMonitor_HealthyThreshold(t *testing.T) {
 		UnhealthyThreshold: 3,
 		HealthyThreshold:   2, // Need 2 consecutive successes
 	}
-	mon := NewHealthMonitor(rt, st, nil, cfg, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, cfg, testLogger())
 
 	containerID := "test-container-healthy12"
 	check := store.HealthCheck{
@@ -300,7 +301,7 @@ func TestMonitor_EventEmission(t *testing.T) {
 		UnhealthyThreshold: 2,
 		HealthyThreshold:   1,
 	}
-	mon := NewHealthMonitor(rt, st, nil, cfg, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, cfg, testLogger())
 
 	containerID := "test-container-events12"
 	check := store.HealthCheck{
@@ -354,7 +355,7 @@ checkEvents:
 func TestMonitor_Subscription(t *testing.T) {
 	rt := &mockRuntime{}
 	st := testutil.TempStore(t)
-	mon := NewHealthMonitor(rt, st, nil, HealthMonitorConfig{}, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, HealthMonitorConfig{}, testLogger())
 
 	ch := mon.Subscribe()
 	if ch == nil {
@@ -378,7 +379,7 @@ func TestMonitor_DeregisterDuringCheck(t *testing.T) {
 		UnhealthyThreshold: 3,
 		HealthyThreshold:   1,
 	}
-	mon := NewHealthMonitor(rt, st, nil, cfg, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, cfg, testLogger())
 
 	containerID := "test-container-deregist"
 	check := store.HealthCheck{
@@ -407,7 +408,7 @@ func TestMonitor_DeregisterDuringCheck(t *testing.T) {
 func TestMonitor_StopCleanup(t *testing.T) {
 	rt := &mockRuntime{}
 	st := testutil.TempStore(t)
-	mon := NewHealthMonitor(rt, st, nil, HealthMonitorConfig{CheckInterval: 50 * time.Millisecond}, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, HealthMonitorConfig{CheckInterval: 50 * time.Millisecond}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -426,7 +427,7 @@ func TestMonitor_StopCleanup(t *testing.T) {
 func TestMonitor_DefaultConfig(t *testing.T) {
 	rt := &mockRuntime{}
 	st := testutil.TempStore(t)
-	mon := NewHealthMonitor(rt, st, nil, HealthMonitorConfig{}, testLogger())
+	mon := NewHealthMonitor(rt, st, nil, nil, HealthMonitorConfig{}, testLogger())
 
 	if mon.config.CheckInterval != 10*time.Second {
 		t.Errorf("expected default 10s interval, got %v", mon.config.CheckInterval)
@@ -457,7 +458,7 @@ func TestMonitor_RestarterIntegration(t *testing.T) {
 		UnhealthyThreshold: 2,
 		HealthyThreshold:   1,
 	}
-	mon := NewHealthMonitor(rt, st, restarter, cfg, testLogger())
+	mon := NewHealthMonitor(rt, st, restarter, nil, cfg, testLogger())
 
 	containerID := "test-container-restrt12"
 	check := store.HealthCheck{
@@ -822,4 +823,409 @@ func TestStoreHealthResult_PruneNoop(t *testing.T) {
 	if err := st.PruneHealthResults("nonexistent", 5); err != nil {
 		t.Fatalf("prune of nonexistent should not fail: %v", err)
 	}
+}
+
+// --- Alerter Tests ---
+
+func TestAlerter_NewAlerter_Defaults(t *testing.T) {
+	a := NewAlerter(AlertConfig{}, testLogger())
+	if a.config.MinInterval != 5*time.Minute {
+		t.Errorf("expected default 5m min interval, got %v", a.config.MinInterval)
+	}
+}
+
+func TestAlerter_SendAlert_Disabled(t *testing.T) {
+	a := NewAlerter(AlertConfig{Enabled: false, WebhookURL: "http://example.com"}, testLogger())
+
+	err := a.SendAlert(context.Background(), Alert{
+		Type:        "unhealthy",
+		ContainerID: "container-disabled-12",
+		Timestamp:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("expected no error for disabled alerter, got: %v", err)
+	}
+}
+
+func TestAlerter_SendAlert_EmptyURL(t *testing.T) {
+	a := NewAlerter(AlertConfig{Enabled: true, WebhookURL: ""}, testLogger())
+
+	err := a.SendAlert(context.Background(), Alert{
+		Type:        "unhealthy",
+		ContainerID: "container-nourl-12345",
+		Timestamp:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("expected no error for empty URL, got: %v", err)
+	}
+}
+
+func TestAlerter_SendAlert_Success(t *testing.T) {
+	var receivedPayload []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedPayload = body
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("expected Content-Type application/json, got %s", r.Header.Get("Content-Type"))
+		}
+		if r.Header.Get("User-Agent") != "Vessel/1.0" {
+			t.Errorf("expected User-Agent Vessel/1.0, got %s", r.Header.Get("User-Agent"))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:    true,
+		WebhookURL: srv.URL,
+	}, testLogger())
+
+	alert := Alert{
+		Type:        "unhealthy",
+		AppID:       "my-app",
+		ContainerID: "container-alert-test1",
+		Message:     "health check failed",
+		Timestamp:   time.Now(),
+	}
+
+	err := a.SendAlert(context.Background(), alert)
+	if err != nil {
+		t.Fatalf("SendAlert failed: %v", err)
+	}
+
+	// Verify payload
+	var received Alert
+	if err := json.Unmarshal(receivedPayload, &received); err != nil {
+		t.Fatalf("failed to unmarshal received payload: %v", err)
+	}
+	if received.Type != "unhealthy" {
+		t.Errorf("expected type 'unhealthy', got '%s'", received.Type)
+	}
+	if received.AppID != "my-app" {
+		t.Errorf("expected app_id 'my-app', got '%s'", received.AppID)
+	}
+	if received.ContainerID != "container-alert-test1" {
+		t.Errorf("expected container_id, got '%s'", received.ContainerID)
+	}
+	if received.Message != "health check failed" {
+		t.Errorf("expected message 'health check failed', got '%s'", received.Message)
+	}
+}
+
+func TestAlerter_SendAlert_WebhookError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:    true,
+		WebhookURL: srv.URL,
+	}, testLogger())
+
+	err := a.SendAlert(context.Background(), Alert{
+		Type:        "unhealthy",
+		ContainerID: "container-webhook-err",
+		Timestamp:   time.Now(),
+	})
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestAlerter_RateLimiting(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:     true,
+		WebhookURL:  srv.URL,
+		MinInterval: 1 * time.Hour, // Very long interval for testing
+	}, testLogger())
+
+	containerID := "container-ratelimit-1"
+
+	// First alert should go through
+	a.SendAlert(context.Background(), Alert{
+		Type: "unhealthy", ContainerID: containerID, Timestamp: time.Now(),
+	})
+
+	// Second alert for same container should be rate-limited
+	a.SendAlert(context.Background(), Alert{
+		Type: "unhealthy", ContainerID: containerID, Timestamp: time.Now(),
+	})
+
+	if atomic.LoadInt32(&callCount) != 1 {
+		t.Errorf("expected 1 webhook call (second should be rate-limited), got %d", callCount)
+	}
+
+	// Different container should still go through
+	a.SendAlert(context.Background(), Alert{
+		Type: "unhealthy", ContainerID: "container-ratelimit-2", Timestamp: time.Now(),
+	})
+
+	if atomic.LoadInt32(&callCount) != 2 {
+		t.Errorf("expected 2 webhook calls (different container), got %d", callCount)
+	}
+}
+
+func TestAlerter_RecoveryAlerts_Disabled(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:         true,
+		WebhookURL:      srv.URL,
+		IncludeRecovers: false,
+	}, testLogger())
+
+	// Recovery alert should be skipped
+	a.SendAlert(context.Background(), Alert{
+		Type: "recovered", ContainerID: "container-recover-off", Timestamp: time.Now(),
+	})
+
+	if atomic.LoadInt32(&callCount) != 0 {
+		t.Errorf("expected 0 webhook calls (recovery disabled), got %d", callCount)
+	}
+}
+
+func TestAlerter_RecoveryAlerts_Enabled(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:         true,
+		WebhookURL:      srv.URL,
+		IncludeRecovers: true,
+	}, testLogger())
+
+	a.SendAlert(context.Background(), Alert{
+		Type: "recovered", ContainerID: "container-recover-on1", Timestamp: time.Now(),
+	})
+
+	if atomic.LoadInt32(&callCount) != 1 {
+		t.Errorf("expected 1 webhook call (recovery enabled), got %d", callCount)
+	}
+}
+
+func TestAlerter_HandleHealthEvent_Unhealthy(t *testing.T) {
+	var receivedType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var alert Alert
+		json.Unmarshal(body, &alert)
+		receivedType = alert.Type
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:    true,
+		WebhookURL: srv.URL,
+	}, testLogger())
+
+	event := HealthEvent{
+		ContainerID: "container-event-unhlt",
+		AppID:       "test-app",
+		OldStatus:   store.HealthStatusHealthy,
+		NewStatus:   store.HealthStatusUnhealthy,
+		Message:     "check failed",
+		Timestamp:   time.Now(),
+	}
+
+	a.HandleHealthEvent(context.Background(), event)
+
+	// Give async webhook time
+	time.Sleep(50 * time.Millisecond)
+
+	if receivedType != "unhealthy" {
+		t.Errorf("expected type 'unhealthy', got '%s'", receivedType)
+	}
+}
+
+func TestAlerter_HandleHealthEvent_Recovered(t *testing.T) {
+	var receivedType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var alert Alert
+		json.Unmarshal(body, &alert)
+		receivedType = alert.Type
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:         true,
+		WebhookURL:      srv.URL,
+		IncludeRecovers: true,
+	}, testLogger())
+
+	event := HealthEvent{
+		ContainerID: "container-event-recov",
+		AppID:       "test-app",
+		OldStatus:   store.HealthStatusUnhealthy,
+		NewStatus:   store.HealthStatusHealthy,
+		Message:     "recovered",
+		Timestamp:   time.Now(),
+	}
+
+	a.HandleHealthEvent(context.Background(), event)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if receivedType != "recovered" {
+		t.Errorf("expected type 'recovered', got '%s'", receivedType)
+	}
+}
+
+func TestAlerter_HandleHealthEvent_InitialHealthy_Ignored(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:         true,
+		WebhookURL:      srv.URL,
+		IncludeRecovers: true,
+	}, testLogger())
+
+	// Unknown -> Healthy transition should NOT trigger alert
+	event := HealthEvent{
+		ContainerID: "container-init-health",
+		AppID:       "test-app",
+		OldStatus:   store.HealthStatusUnknown,
+		NewStatus:   store.HealthStatusHealthy,
+		Timestamp:   time.Now(),
+	}
+
+	a.HandleHealthEvent(context.Background(), event)
+	time.Sleep(50 * time.Millisecond)
+
+	if atomic.LoadInt32(&callCount) != 0 {
+		t.Errorf("expected 0 calls for initial healthy, got %d", callCount)
+	}
+}
+
+func TestAlerter_HandleHealthEvent_UnknownStatus_Ignored(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := NewAlerter(AlertConfig{
+		Enabled:    true,
+		WebhookURL: srv.URL,
+	}, testLogger())
+
+	event := HealthEvent{
+		ContainerID: "container-unknown-sts",
+		AppID:       "test-app",
+		OldStatus:   store.HealthStatusHealthy,
+		NewStatus:   store.HealthStatusUnknown,
+		Timestamp:   time.Now(),
+	}
+
+	a.HandleHealthEvent(context.Background(), event)
+	time.Sleep(50 * time.Millisecond)
+
+	if atomic.LoadInt32(&callCount) != 0 {
+		t.Errorf("expected 0 calls for unknown status, got %d", callCount)
+	}
+}
+
+func TestAlerter_MonitorIntegration(t *testing.T) {
+	// Test that alerts are sent when the health monitor detects status changes
+	var alertReceived atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		alertReceived.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rt := &mockRuntime{
+		execFn: func(ctx context.Context, containerID string, cmd []string) error {
+			return fmt.Errorf("process dead")
+		},
+	}
+	st := testutil.TempStore(t)
+
+	alerter := NewAlerter(AlertConfig{
+		Enabled:    true,
+		WebhookURL: srv.URL,
+	}, testLogger())
+
+	cfg := HealthMonitorConfig{
+		CheckInterval:      50 * time.Millisecond,
+		UnhealthyThreshold: 2,
+		HealthyThreshold:   1,
+	}
+	mon := NewHealthMonitor(rt, st, nil, alerter, cfg, testLogger())
+
+	containerID := "container-alert-integ"
+	check := store.HealthCheck{
+		Type:    store.HealthCheckCommand,
+		Target:  "check",
+		Timeout: 5 * time.Second,
+	}
+	mon.RegisterContainer(containerID, "app-1", check)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mon.Start(ctx)
+	defer mon.Stop()
+
+	// Wait for unhealthy threshold to trigger alert
+	time.Sleep(300 * time.Millisecond)
+
+	if !alertReceived.Load() {
+		t.Error("expected alert to be sent when container becomes unhealthy")
+	}
+}
+
+func TestHumanDuration(t *testing.T) {
+	tests := []struct {
+		input    time.Duration
+		expected string
+	}{
+		{5 * time.Second, "5s"},
+		{30 * time.Second, "30s"},
+		{2 * time.Minute, "2m"},
+		{45 * time.Minute, "45m"},
+		{3 * time.Hour, "3h"},
+		{24 * time.Hour, "24h"},
+	}
+
+	for _, tt := range tests {
+		got := humanDuration(tt.input)
+		if got != tt.expected {
+			t.Errorf("humanDuration(%v) = %s, want %s", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func humanDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
 }
