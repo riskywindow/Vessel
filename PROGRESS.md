@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 5 — CLI Polish & Remote Deploy
 
-### Status: IN PROGRESS (Session 1 — `vessel exec` COMPLETE)
+### Status: IN PROGRESS (Session 2 — `vessel doctor` & styled output COMPLETE)
 
 ---
 
@@ -162,13 +162,13 @@
 - [x] 15 new tests (alerter unit tests + monitor integration)
 
 ## Phase 5: CLI Polish & Remote Deploy (Week 11) — IN PROGRESS
-- [ ] Styled terminal output (lipgloss)
+- [x] Styled terminal output (lipgloss) — Session 16
 - [ ] Progress indicators for image pulls and deploys
 - [x] `vessel init` — interactive setup (moved to Phase 2 Week 7)
 - [x] `vessel exec` — run command inside container (Session 15)
 - [ ] `vessel ssh` — remote deploy via SSH
 - [ ] Shell autocomplete (bash, zsh, fish)
-- [ ] `vessel doctor` — system prerequisites check
+- [x] `vessel doctor` — system prerequisites check (Session 16)
 - [x] `vessel fmt` — config validation and formatting (moved to Phase 2 Week 7)
 
 ## Phase 6: Web Dashboard (Weeks 12-13) — NOT STARTED
@@ -1031,3 +1031,85 @@
 
 **Next:**
 - Phase 5 continued: `vessel doctor`, shell autocomplete, styled output
+
+### Session 16 — 2026-02-09 ✅
+**Task:** Phase 5 Session 2 — `vessel doctor` & Styled Terminal Output
+
+**Completed:**
+- Added `github.com/charmbracelet/lipgloss` v1.1.0 dependency
+- Created centralized styles package (`internal/cli/styles/styles.go`, ~85 lines):
+  - Status colors: Success (green), Error (red), Warning (orange), Info (blue), Muted (gray)
+  - Semantic styles: AppName, ContainerID, Version, Header, TableHeader, Bold
+  - Icon functions: SuccessIcon, ErrorIcon, WarningIcon, InfoIcon, CheckPassIcon, CheckFailIcon, CheckWarnIcon
+  - StatusDot() for colored status indicators (running/stopped/failed/deploying/healthy/unhealthy)
+  - NO_COLOR env var support via ColorEnabled() and Render() helper
+- Implemented `vessel doctor` (`internal/cli/doctor.go`, ~300 lines):
+  - 9 diagnostic checks: OS, Kernel, cgroups v2, OverlayFS, required commands (7), network, permissions, directories, daemon
+  - CheckResult struct with JSON serialization support
+  - Colored output with ✓/✗/! icons per check
+  - Summary with pass/warn/fail counts
+  - `--json` output mode for machine-readable diagnostics
+  - `--verbose` shows additional details per check
+- Updated `vessel ps` (`internal/cli/ps.go`):
+  - Styled table headers (TableHeader style)
+  - Colored app status (running=green, stopped=gray, failed=red, deploying=yellow)
+  - Colored instance counts (all running=green, none=red, partial=yellow)
+  - App names styled with AppName style
+- Updated `vessel deploy` (`internal/cli/deploy.go`):
+  - ✓/✗ icons for success/failure messages
+  - Styled app names and version numbers
+  - Colored deploy summary with styled header
+- Updated `vessel health` (`internal/cli/health.go`):
+  - Styled table headers across all subcommands (check, history, watch)
+  - Colored health status (healthy=green, unhealthy=red, unknown=gray)
+  - Colored container state (running=green, stopped=gray, failed=red)
+  - Styled container IDs and app names
+  - Helper functions: styledHealthStatus(), styledContainerState()
+- Updated `vessel history` (`internal/cli/history.go`):
+  - Styled table headers
+  - Colored deploy status (active=green, failed=red, rolled_back=yellow, pending=gray)
+  - Colored version numbers (Version style)
+  - Error messages in red
+- Updated `vessel stats` (`internal/cli/stats.go`):
+  - Styled table headers
+  - Styled container IDs
+- Fixed flaky test (`internal/health/metrics_test.go`):
+  - Added +1 tolerance for in-flight collection in DeregisterStopsCollection test
+- Wrote comprehensive test suite (28 new tests):
+  - `internal/cli/styles/styles_test.go` (17 tests):
+    - ColorEnabled default and NO_COLOR modes
+    - Render with/without color
+    - All icon functions (Success, Error, Warning, Info, CheckPass, CheckFail, CheckWarn)
+    - StatusDot for all states (running, stopped, failed, healthy, unknown)
+    - All exported styles render without panic
+  - `internal/cli/doctor_test.go` (11 tests):
+    - checkOS on Linux
+    - checkKernel version parsing
+    - checkCgroupsV2, checkOverlayFS availability
+    - checkRequiredCommands (7 commands verified)
+    - checkUserPermissions, checkNetworkCapabilities
+    - checkVesselDirectories, checkDaemonStatus
+    - CheckResult struct fields and status values
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 10 packages pass
+- `go vet ./...` — clean
+- cli: 11 tests (new package)
+- styles: 17 tests (new package)
+- config: 26, daemon: 10, health: 62, manager: 83, network: 60, runtime: 24, store: 27
+- **Total: ~320 unit tests across all packages**
+
+**Dependencies Added:**
+- `github.com/charmbracelet/lipgloss` v1.1.0 (terminal styling)
+
+**Architecture Decisions:**
+- Styles centralized in `internal/cli/styles/` package (not scattered across CLI files)
+- NO_COLOR env var respected per convention (https://no-color.org)
+- Styled output bypassed for --json mode (JSON path returns before styled printing)
+- Doctor checks return CheckResult structs (testable, JSON-serializable)
+- Doctor uses daemon.Client.Ping() for daemon health check
+- All styled CLI output uses the same color semantics (green=success, red=error, yellow=warning, gray=muted)
+
+**Next:**
+- Phase 5 continued: shell autocomplete, progress indicators, `vessel ssh`

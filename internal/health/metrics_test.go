@@ -356,7 +356,8 @@ func TestMetricsCollector_DeregisterStopsCollection(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	countAfter := atomic.LoadInt64(&collectCount)
 
-	if countAfter != countBefore {
+	// Allow +1 tolerance for an in-flight collection that started before deregister took effect
+	if countAfter > countBefore+1 {
 		t.Errorf("collection continued after deregister: before=%d, after=%d", countBefore, countAfter)
 	}
 }

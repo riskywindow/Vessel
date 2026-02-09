@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/styles"
 	"github.com/vessel/vessel/internal/daemon"
 	"github.com/vessel/vessel/internal/store"
 )
@@ -51,7 +52,13 @@ func runPs(cmd *cobra.Command, args []string) error {
 	}
 
 	// Table header
-	fmt.Printf("%-16s %-12s %-12s %-16s %-24s %-12s\n", "NAME", "STATUS", "INSTANCES", "IP", "IMAGE", "UPTIME")
+	fmt.Printf("%-16s %-12s %-12s %-16s %-24s %-12s\n",
+		styles.TableHeader.Render("NAME"),
+		styles.TableHeader.Render("STATUS"),
+		styles.TableHeader.Render("INSTANCES"),
+		styles.TableHeader.Render("IP"),
+		styles.TableHeader.Render("IMAGE"),
+		styles.TableHeader.Render("UPTIME"))
 	fmt.Println(strings.Repeat("-", 96))
 
 	for _, app := range apps {
@@ -70,7 +77,33 @@ func runPs(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		instances := fmt.Sprintf("%d/%d", running, app.Instances)
+		// Status with color
+		var statusStr string
+		switch app.State {
+		case store.AppStateRunning:
+			statusStr = styles.Success.Render(string(app.State))
+		case store.AppStateStopped:
+			statusStr = styles.Muted.Render(string(app.State))
+		case store.AppStateFailed:
+			statusStr = styles.Error.Render(string(app.State))
+		case store.AppStateDeploying:
+			statusStr = styles.Warning.Render(string(app.State))
+		default:
+			statusStr = string(app.State)
+		}
+
+		// Instance count with color
+		instanceStr := fmt.Sprintf("%d/%d", running, app.Instances)
+		if running == app.Instances && app.Instances > 0 {
+			instanceStr = styles.Success.Render(instanceStr)
+		} else if running == 0 {
+			instanceStr = styles.Error.Render(instanceStr)
+		} else {
+			instanceStr = styles.Warning.Render(instanceStr)
+		}
+
+		// App name styled
+		appNameStr := styles.AppName.Render(truncate(app.Name, 16))
 
 		// Collect container IP for display
 		ip := "-"
@@ -92,9 +125,9 @@ func runPs(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("%-16s %-12s %-12s %-16s %-24s %-12s\n",
-			truncate(app.Name, 16),
-			string(app.State),
-			instances,
+			appNameStr,
+			statusStr,
+			instanceStr,
 			ip,
 			image,
 			uptime,

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/styles"
 	"github.com/vessel/vessel/internal/daemon"
 	"github.com/vessel/vessel/internal/store"
 )
@@ -59,7 +60,13 @@ func runHistory(cmd *cobra.Command, args []string) error {
 
 	// Table header
 	fmt.Printf("%-8s %-12s %-30s %-10s %-16s %-8s %s\n",
-		"VERSION", "STATUS", "IMAGE", "STRATEGY", "DEPLOYED", "DURATION", "NOTES")
+		styles.TableHeader.Render("VERSION"),
+		styles.TableHeader.Render("STATUS"),
+		styles.TableHeader.Render("IMAGE"),
+		styles.TableHeader.Render("STRATEGY"),
+		styles.TableHeader.Render("DEPLOYED"),
+		styles.TableHeader.Render("DURATION"),
+		styles.TableHeader.Render("NOTES"))
 	fmt.Println(strings.Repeat("-", 100))
 
 	for _, d := range deploys {
@@ -84,12 +91,30 @@ func runHistory(cmd *cobra.Command, args []string) error {
 			if len(errMsg) > 40 {
 				errMsg = errMsg[:37] + "..."
 			}
-			notes = fmt.Sprintf("(%s)", errMsg)
+			notes = styles.Error.Render(fmt.Sprintf("(%s)", errMsg))
 		}
 
-		fmt.Printf("%-8d %-12s %-30s %-10s %-16s %-8s %s\n",
-			d.Version,
-			string(d.Status),
+		// Version with color
+		versionStr := styles.Version.Render(fmt.Sprintf("v%d", d.Version))
+
+		// Status with color
+		var statusStr string
+		switch d.Status {
+		case store.DeployStatusActive:
+			statusStr = styles.Success.Render(string(d.Status))
+		case store.DeployStatusFailed:
+			statusStr = styles.Error.Render(string(d.Status))
+		case store.DeployStatusRolledBack:
+			statusStr = styles.Warning.Render(string(d.Status))
+		case store.DeployStatusPending:
+			statusStr = styles.Muted.Render(string(d.Status))
+		default:
+			statusStr = string(d.Status)
+		}
+
+		fmt.Printf("%-8s %-12s %-30s %-10s %-16s %-8s %s\n",
+			versionStr,
+			statusStr,
 			image,
 			string(d.Strategy),
 			deployed,

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/styles"
 	"github.com/vessel/vessel/internal/daemon"
 	"github.com/vessel/vessel/internal/store"
 )
@@ -65,7 +66,13 @@ func runStats(cmd *cobra.Command, args []string) error {
 	}
 
 	// Table header
-	fmt.Printf("%-14s %-8s %-20s %-8s %-10s %-10s\n", "CONTAINER", "CPU", "MEMORY", "PIDS", "NET RX", "NET TX")
+	fmt.Printf("%-14s %-8s %-20s %-8s %-10s %-10s\n",
+		styles.TableHeader.Render("CONTAINER"),
+		styles.TableHeader.Render("CPU"),
+		styles.TableHeader.Render("MEMORY"),
+		styles.TableHeader.Render("PIDS"),
+		styles.TableHeader.Render("NET RX"),
+		styles.TableHeader.Render("NET TX"))
 	fmt.Println(strings.Repeat("-", 74))
 
 	for _, c := range containers {
@@ -89,7 +96,7 @@ func runStats(cmd *cobra.Command, args []string) error {
 		txStr := humanBytes(stats.NetworkTxBytes)
 
 		fmt.Printf("%-14s %-8s %-20s %-8s %-10s %-10s\n",
-			c.ID[:12], cpuStr, memStr, pidsStr, rxStr, txStr)
+			styles.ContainerID.Render(c.ID[:12]), cpuStr, memStr, pidsStr, rxStr, txStr)
 	}
 
 	return nil

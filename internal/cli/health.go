@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/styles"
 	"github.com/vessel/vessel/internal/daemon"
 	"github.com/vessel/vessel/internal/health"
 	"github.com/vessel/vessel/internal/store"
@@ -84,7 +85,12 @@ func showAllHealth(client *daemon.Client) error {
 	}
 
 	fmt.Printf("%-14s %-12s %-10s %-8s %-24s %s\n",
-		"CONTAINER", "APP", "STATUS", "FAILS", "LAST CHECK", "MESSAGE")
+		styles.TableHeader.Render("CONTAINER"),
+		styles.TableHeader.Render("APP"),
+		styles.TableHeader.Render("STATUS"),
+		styles.TableHeader.Render("FAILS"),
+		styles.TableHeader.Render("LAST CHECK"),
+		styles.TableHeader.Render("MESSAGE"))
 	fmt.Println(strings.Repeat("-", 85))
 
 	for _, ch := range statuses {
@@ -97,7 +103,7 @@ func showAllHealth(client *daemon.Client) error {
 			appID = appID[:10]
 		}
 
-		statusStr := string(ch.Status)
+		statusStr := styledHealthStatus(string(ch.Status))
 		lastCheck := "—"
 		if !ch.LastCheck.IsZero() {
 			lastCheck = ch.LastCheck.Format(time.RFC3339)
@@ -108,7 +114,7 @@ func showAllHealth(client *daemon.Client) error {
 		}
 
 		fmt.Printf("%-14s %-12s %-10s %-8d %-24s %s\n",
-			containerID, appID, statusStr, ch.ConsecutiveFails, lastCheck, message)
+			styles.ContainerID.Render(containerID), appID, statusStr, ch.ConsecutiveFails, lastCheck, message)
 	}
 
 	return nil
@@ -148,9 +154,14 @@ func showAppHealth(client *daemon.Client, appName string) error {
 		return nil
 	}
 
-	fmt.Printf("Health status for app '%s':\n\n", appName)
+	fmt.Printf("Health status for app '%s':\n\n", styles.AppName.Render(appName))
 	fmt.Printf("%-14s %-10s %-10s %-8s %-24s %s\n",
-		"CONTAINER", "STATE", "HEALTH", "FAILS", "LAST CHECK", "MESSAGE")
+		styles.TableHeader.Render("CONTAINER"),
+		styles.TableHeader.Render("STATE"),
+		styles.TableHeader.Render("HEALTH"),
+		styles.TableHeader.Render("FAILS"),
+		styles.TableHeader.Render("LAST CHECK"),
+		styles.TableHeader.Render("MESSAGE"))
 	fmt.Println(strings.Repeat("-", 80))
 
 	for _, r := range results {
@@ -159,13 +170,13 @@ func showAppHealth(client *daemon.Client, appName string) error {
 			containerID = containerID[:12]
 		}
 
-		healthStr := "—"
+		healthStr := styles.Muted.Render("—")
 		fails := 0
 		lastCheck := "—"
 		message := "—"
 
 		if r.Health != nil {
-			healthStr = string(r.Health.Status)
+			healthStr = styledHealthStatus(string(r.Health.Status))
 			fails = r.Health.ConsecutiveFails
 			if !r.Health.LastCheck.IsZero() {
 				lastCheck = r.Health.LastCheck.Format(time.RFC3339)
@@ -178,8 +189,10 @@ func showAppHealth(client *daemon.Client, appName string) error {
 			}
 		}
 
+		stateStr := styledContainerState(string(r.Container.State))
+
 		fmt.Printf("%-14s %-10s %-10s %-8d %-24s %s\n",
-			containerID, r.Container.State, healthStr, fails, lastCheck, message)
+			styles.ContainerID.Render(containerID), stateStr, healthStr, fails, lastCheck, message)
 	}
 
 	return nil
@@ -206,8 +219,8 @@ func runHealthCheck(cmd *cobra.Command, args []string) error {
 		shortID = shortID[:12]
 	}
 
-	fmt.Printf("Container: %s\n", shortID)
-	fmt.Printf("Status:    %s\n", result.Status)
+	fmt.Printf("Container: %s\n", styles.ContainerID.Render(shortID))
+	fmt.Printf("Status:    %s\n", styledHealthStatus(string(result.Status)))
 	fmt.Printf("Duration:  %v\n", result.Duration.Round(time.Millisecond))
 	if result.Message != "" {
 		fmt.Printf("Message:   %s\n", result.Message)
@@ -245,12 +258,16 @@ func runHealthHistory(cmd *cobra.Command, args []string) error {
 		shortID = shortID[:12]
 	}
 
-	fmt.Printf("Health history for container %s:\n\n", shortID)
-	fmt.Printf("%-20s %-12s %-12s %s\n", "TIME", "STATUS", "DURATION", "MESSAGE")
+	fmt.Printf("Health history for container %s:\n\n", styles.ContainerID.Render(shortID))
+	fmt.Printf("%-20s %-12s %-12s %s\n",
+		styles.TableHeader.Render("TIME"),
+		styles.TableHeader.Render("STATUS"),
+		styles.TableHeader.Render("DURATION"),
+		styles.TableHeader.Render("MESSAGE"))
 	fmt.Println(strings.Repeat("-", 70))
 
 	for _, r := range results {
-		statusStr := string(r.Status)
+		statusStr := styledHealthStatus(string(r.Status))
 
 		msg := r.Message
 		if len(msg) > 30 {
@@ -298,4 +315,30 @@ func humanDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%dh", int(d.Hours()))
+}
+
+// styledHealthStatus returns a colored health status string.
+func styledHealthStatus(status string) string {
+	switch status {
+	case "healthy":
+		return styles.Success.Render(status)
+	case "unhealthy":
+		return styles.Error.Render(status)
+	default:
+		return styles.Muted.Render(status)
+	}
+}
+
+// styledContainerState returns a colored container state string.
+func styledContainerState(state string) string {
+	switch state {
+	case "running":
+		return styles.Success.Render(state)
+	case "stopped":
+		return styles.Muted.Render(state)
+	case "failed":
+		return styles.Error.Render(state)
+	default:
+		return state
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/styles"
 	"github.com/vessel/vessel/internal/config"
 	"github.com/vessel/vessel/internal/daemon"
 	"github.com/vessel/vessel/internal/store"
@@ -148,12 +149,17 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Print summary if deploying multiple apps
 	if len(appsToDeploy) > 1 {
-		fmt.Println("\nDeploy Summary:")
+		fmt.Println()
+		fmt.Println(styles.Header.Render("Deploy Summary:"))
 		for _, r := range results {
 			if r.err != nil {
-				fmt.Printf("  x %-15s v%d -> v%d  FAILED (%v)\n", r.name, r.oldVer, r.newVer, r.err)
+				fmt.Printf("  %s %-15s v%d -> v%d  %s (%v)\n",
+					styles.ErrorIcon(), styles.AppName.Render(r.name),
+					r.oldVer, r.newVer, styles.Error.Render("FAILED"), r.err)
 			} else {
-				fmt.Printf("  > %-15s v%d -> v%d  (%s)\n", r.name, r.oldVer, r.newVer, r.duration.Round(time.Second))
+				fmt.Printf("  %s %-15s v%d -> v%d  (%s)\n",
+					styles.SuccessIcon(), styles.AppName.Render(r.name),
+					r.oldVer, r.newVer, r.duration.Round(time.Second))
 			}
 		}
 	}
@@ -191,7 +197,8 @@ func deployOneApp(client *daemon.Client, appCfg *config.AppConfig) error {
 	var deploy store.Deploy
 	err := client.Call("apps.deploy_config", appCfg, &deploy)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  x %s deploy failed: %v\n", appCfg.Name, err)
+		fmt.Fprintf(os.Stderr, "  %s %s deploy failed: %v\n",
+			styles.ErrorIcon(), styles.AppName.Render(appCfg.Name), err)
 		return err
 	}
 
@@ -202,11 +209,13 @@ func deployOneApp(client *daemon.Client, appCfg *config.AppConfig) error {
 	}
 
 	if deploy.Status == store.DeployStatusFailed {
-		fmt.Fprintf(os.Stderr, "  x %s deploy failed: %s. Old version still running.\n",
-			appCfg.Name, deploy.Error)
+		fmt.Fprintf(os.Stderr, "  %s %s deploy failed: %s. Old version still running.\n",
+			styles.ErrorIcon(), styles.AppName.Render(appCfg.Name), deploy.Error)
 		return fmt.Errorf("deploy failed for %s", appCfg.Name)
 	}
 
-	fmt.Printf("  > %s deployed successfully (v%d)\n", appCfg.Name, deploy.Version)
+	fmt.Printf("  %s %s deployed successfully (%s)\n",
+		styles.SuccessIcon(), styles.AppName.Render(appCfg.Name),
+		styles.Version.Render(fmt.Sprintf("v%d", deploy.Version)))
 	return nil
 }
