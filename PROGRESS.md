@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 4 — Health Monitoring & Reliability
 
-### Status: IN PROGRESS (Session 1 COMPLETE — Health Monitor & Auto-Restart)
+### Status: IN PROGRESS (Sessions 1-2 COMPLETE — Health Monitor, Auto-Restart, Resource Metrics)
 
 ---
 
@@ -138,11 +138,17 @@
 - [x] RestartContainer in AppManager
 - [x] Health status socket handlers (health.status, health.all)
 - [x] 41 new tests (29 health + 12 manager)
+### Session 2: Resource Monitoring & Time-Series Metrics ✅
+- [x] Time-series metrics storage (store/metrics.go)
+- [x] MetricsCollector with periodic collection (health/metrics.go)
+- [x] Metrics pruning (hourly, configurable retention)
+- [x] Metrics integration in deploy pipeline (register/deregister)
+- [x] Metrics socket handlers (metrics.get, metrics.latest)
+- [x] Updated `vessel stats` with NET RX/TX columns, metrics.latest fallback
+- [x] Implemented `vessel health` CLI command (summary + per-app detail)
+- [x] 25 new tests (18 health/metrics + 7 manager/metrics)
 ### Remaining
-- [ ] Resource monitoring (cgroup stats)
-- [ ] Time-series metrics storage
 - [ ] Webhook alerting
-- [ ] Implement `vessel health` CLI command
 
 ## Phase 5: CLI Polish & Remote Deploy (Week 11) — NOT STARTED
 - [ ] Styled terminal output (lipgloss)
@@ -804,3 +810,79 @@
 
 **Next:**
 - Phase 4 Session 2: Resource monitoring (cgroup stats), time-series metrics, `vessel health` CLI
+
+### Session 13 — 2026-02-09 ✅
+**Task:** Phase 4 Session 2 — Resource Monitoring & Time-Series Metrics
+
+**Completed:**
+- Implemented time-series metrics storage (`internal/store/metrics.go`, ~115 lines):
+  - `CreateMetricPoint()`: keyed by "containerID:timestamp_unix_nano" for efficient range queries
+  - `GetMetrics()`: supports time range, limit, and negative limit (last N)
+  - `PruneMetrics()`: removes all metric points older than cutoff time
+  - Added 3 new methods to Store interface, `bucketMetrics` bucket to BoltStore
+- Implemented MetricsCollector (`internal/health/metrics.go`, ~170 lines):
+  - `MetricsCollector` with periodic collection loop (default 15s interval)
+  - `RegisterContainer()`/`DeregisterContainer()` for container lifecycle
+  - `collectAll()`: reads cgroup stats via runtime.ContainerStats, stores as MetricPoint
+  - `runPruner()`: hourly goroutine removes metrics beyond retention (default 24h)
+  - `GetMetrics()`/`GetLatestMetrics()`: query methods for stored time-series
+  - `Start()`/`Stop()`: lifecycle with WaitGroup-based graceful shutdown
+- Integrated MetricsCollector into daemon (`internal/daemon/daemon.go`):
+  - Added `metricsCollector` field to Daemon struct
+  - Created in NewDaemon (15s interval, 24h retention)
+  - Started in daemon Start(), stopped in shutdown()
+  - Wired into AppManager via SetMetricsCollector()
+- Added socket handlers (`internal/daemon/socket.go`):
+  - `metrics.get`: returns metrics for a container within time range with limit
+  - `metrics.latest`: returns most recent metric point for a container
+  - NewHandler now takes 7 args (added MetricsCollector, can be nil)
+- Integrated metrics into deploy pipeline (`internal/manager/deploy.go`):
+  - `registerMetricsCollector()`: registers containers after deploy
+  - Called in `deployNewApp`, `deployRolling`, `deployBlueGreen`
+  - Deregistered in `stopAndRemoveContainer()` and `RemoveApp()`
+  - `RestartContainer()` deregisters old, registers new with metrics
+- Added `SetMetricsCollector`/`GetMetricsCollector` to AppManager
+- Updated `vessel stats` (`internal/cli/stats.go`):
+  - Added NET RX and NET TX columns
+  - Tries `metrics.latest` first, falls back to `containers.stats` (live cgroup)
+  - `humanBytes()` helper for formatting byte counts
+- Implemented `vessel health` CLI command (`internal/cli/health.go`, ~160 lines):
+  - `vessel health`: summary of all monitored containers (status, fails, last check, message)
+  - `vessel health <app>`: detailed per-container health with container state
+  - Both support `--json` output mode
+- Wrote comprehensive test suite (25 new tests):
+  - `internal/health/metrics_test.go` (18 tests):
+    - MetricsCollector: defaults, custom intervals, register/deregister, multiple containers,
+      collect stores metrics, stats error handling, start/stop, get latest, time range,
+      limit, deregister stops collection
+    - Store metrics: create/get, multiple containers, prune, prune multiple containers,
+      empty results, prune noop, chronological order
+  - `internal/manager/metrics_test.go` (7 tests):
+    - Deploy registers with metrics collector
+    - Deploy without metrics collector succeeds
+    - Deregister metrics on stop/remove
+    - Rolling deploy registers new/deregisters old
+    - Blue-green deploy registers new/deregisters old
+    - SetGetMetricsCollector
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 8 packages pass
+- `go vet ./...` — clean
+- health: 47 tests (was 29, +18 new)
+- manager: 83 tests (was 76, +7 new)
+- config: 26, daemon: 10, network: 60, runtime: 7, store: 27
+- **Total: ~260 unit tests across all packages**
+
+**Architecture Decisions:**
+- MetricsCollector in health/ package (alongside HealthMonitor — both monitor container state)
+- Metrics stored in BoltDB with key "containerID:020d_timestamp_nano" (lexicographic = chronological)
+- Collection interval 15s, retention 24h (both configurable)
+- Pruning runs hourly in a separate goroutine
+- `vessel stats` tries metrics.latest first (stored), falls back to live cgroup stats
+- MetricsCollector optional (nil-safe) throughout AppManager — same pattern as HealthMonitor
+- NewHandler in socket.go now takes 7 args (added MetricsCollector)
+- Network Rx/Tx metrics are 0 for now (would need /proc/net/dev parsing inside container namespace)
+
+**Next:**
+- Phase 4 Session 3: Webhook alerting (final remaining Phase 4 item)

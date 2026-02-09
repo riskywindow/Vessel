@@ -130,6 +130,9 @@ func (m *AppManager) deployNewApp(ctx context.Context, appCfg *config.AppConfig,
 
 		// Register with continuous health monitor
 		m.registerHealthMonitor(c, appCfg)
+
+		// Register with metrics collector
+		m.registerMetricsCollector(c)
 	}
 
 	// Register DNS for the app (best-effort)
@@ -203,6 +206,9 @@ func (m *AppManager) deployRolling(ctx context.Context, app *store.App, appCfg *
 
 		// Register with continuous health monitor
 		m.registerHealthMonitor(newC, appCfg)
+
+		// Register with metrics collector
+		m.registerMetricsCollector(newC)
 
 		// Remove one old container (if available)
 		if i < len(oldContainers) {
@@ -293,6 +299,7 @@ func (m *AppManager) deployBlueGreen(ctx context.Context, app *store.App, appCfg
 	for _, newC := range newContainers {
 		m.registerContainerRoutes(newC, appCfg)
 		m.registerHealthMonitor(newC, appCfg)
+		m.registerMetricsCollector(newC)
 	}
 
 	// Wait drain timeout for in-flight requests to old containers
@@ -443,6 +450,11 @@ func (m *AppManager) getRunningContainers(appID string) ([]*store.Container, err
 
 // stopAndRemoveContainer stops and removes a single container.
 func (m *AppManager) stopAndRemoveContainer(ctx context.Context, c *store.Container) {
+	// Deregister from metrics collector
+	if m.metricsCollector != nil {
+		m.metricsCollector.DeregisterContainer(c.ID)
+	}
+
 	// Deregister from health monitor
 	if m.healthMonitor != nil {
 		m.healthMonitor.DeregisterContainer(c.ID)
@@ -649,6 +661,14 @@ func (m *AppManager) registerHealthMonitor(c *store.Container, appCfg *config.Ap
 		m.logger.Warn("failed to register container with health monitor",
 			"container", c.ID[:12], "error", err)
 	}
+}
+
+// registerMetricsCollector registers a container with the metrics collector.
+func (m *AppManager) registerMetricsCollector(c *store.Container) {
+	if m.metricsCollector == nil {
+		return
+	}
+	m.metricsCollector.RegisterContainer(c.ID)
 }
 
 // configToResourceLimits converts a config.ResourceConfig to store.ResourceLimits.

@@ -28,17 +28,18 @@ const (
 
 // Daemon is the long-running Vessel process that manages containers.
 type Daemon struct {
-	runtime       runtime.Runtime
-	store         store.Store
-	network       network.NetworkManager
-	manager       *manager.AppManager
-	secretManager *store.SecretManager
-	healthMonitor *health.HealthMonitor
-	restarter     *health.AutoRestarter
-	logger        *slog.Logger
-	socket        net.Listener
-	stopCh        chan struct{}
-	wg            sync.WaitGroup
+	runtime          runtime.Runtime
+	store            store.Store
+	network          network.NetworkManager
+	manager          *manager.AppManager
+	secretManager    *store.SecretManager
+	healthMonitor    *health.HealthMonitor
+	restarter        *health.AutoRestarter
+	metricsCollector *health.MetricsCollector
+	logger           *slog.Logger
+	socket           net.Listener
+	stopCh           chan struct{}
+	wg               sync.WaitGroup
 }
 
 // NewDaemon creates a new Daemon instance.
@@ -98,20 +99,30 @@ func NewDaemon(logger *slog.Logger) (*Daemon, error) {
 	}
 	healthMonitor := health.NewHealthMonitor(rt, st, restarter, healthCfg, logger)
 
-	// Wire restarter to manager, and health monitor to manager
+	// Create metrics collector
+	metricsCollector := health.NewMetricsCollector(
+		rt, st,
+		15*time.Second, // collect every 15s
+		24*time.Hour,   // retain 24h
+		logger,
+	)
+
+	// Wire restarter to manager, and health monitor + metrics collector to manager
 	restarter.SetManager(mgr)
 	mgr.SetHealthMonitor(healthMonitor)
+	mgr.SetMetricsCollector(metricsCollector)
 
 	return &Daemon{
-		runtime:       rt,
-		store:         st,
-		network:       netIface,
-		manager:       mgr,
-		secretManager: sm,
-		healthMonitor: healthMonitor,
-		restarter:     restarter,
-		logger:        logger,
-		stopCh:        make(chan struct{}),
+		runtime:          rt,
+		store:            st,
+		network:          netIface,
+		manager:          mgr,
+		secretManager:    sm,
+		healthMonitor:    healthMonitor,
+		restarter:        restarter,
+		metricsCollector: metricsCollector,
+		logger:           logger,
+		stopCh:           make(chan struct{}),
 	}, nil
 }
 
@@ -216,6 +227,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start metrics collector
+	if d.metricsCollector != nil {
+		if err := d.metricsCollector.Start(ctx); err != nil {
+			d.logger.Warn("failed to start metrics collector", "error", err)
+		}
+	}
+
 	// Start the reconciliation loop
 	reconcileCtx, reconcileCancel := context.WithCancel(ctx)
 	d.wg.Add(1)
@@ -288,6 +306,11 @@ func (d *Daemon) shutdown() error {
 		d.logger.Warn("shutdown timed out, forcing exit")
 	}
 
+	// Stop metrics collector
+	if d.metricsCollector != nil {
+		d.metricsCollector.Stop()
+	}
+
 	// Stop health monitoring
 	if d.healthMonitor != nil {
 		d.healthMonitor.Stop()
@@ -345,7 +368,7 @@ func (d *Daemon) acceptConnections(ctx context.Context) {
 func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.network, d.healthMonitor, d.logger)
+	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.network, d.healthMonitor, d.metricsCollector, d.logger)
 	handler.Handle(ctx, conn)
 }
 

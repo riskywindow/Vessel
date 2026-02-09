@@ -15,7 +15,9 @@ var statsCmd = &cobra.Command{
 	Short: "Show resource usage statistics",
 	Long: `Show resource usage statistics for an application's containers.
 
-Displays CPU, memory, and process count metrics from cgroups v2.
+Displays CPU, memory, process count, and network metrics.
+Uses time-series metrics collected by the metrics collector.
+Falls back to live cgroup stats if metrics are unavailable.
 
 Examples:
   vessel stats myapp           # Stats for all containers of an app`,
@@ -48,12 +50,12 @@ func runStats(cmd *cobra.Command, args []string) error {
 			if c.State != store.ContainerStateRunning {
 				continue
 			}
-			var stats store.MetricPoint
-			if err := client.Call("containers.stats", map[string]string{"container_id": c.ID}, &stats); err != nil {
+			stats := getContainerStats(client, c.ID)
+			if stats == nil {
 				continue
 			}
 			results = append(results, map[string]interface{}{
-				"container_id": c.ID[:8],
+				"container_id": c.ID[:12],
 				"stats":        stats,
 			})
 		}
@@ -63,17 +65,17 @@ func runStats(cmd *cobra.Command, args []string) error {
 	}
 
 	// Table header
-	fmt.Printf("%-12s %-8s %-20s %-8s\n", "CONTAINER", "CPU", "MEMORY", "PIDS")
-	fmt.Println(strings.Repeat("-", 52))
+	fmt.Printf("%-14s %-8s %-20s %-8s %-10s %-10s\n", "CONTAINER", "CPU", "MEMORY", "PIDS", "NET RX", "NET TX")
+	fmt.Println(strings.Repeat("-", 74))
 
 	for _, c := range containers {
 		if c.State != store.ContainerStateRunning {
 			continue
 		}
 
-		var stats store.MetricPoint
-		if err := client.Call("containers.stats", map[string]string{"container_id": c.ID}, &stats); err != nil {
-			fmt.Printf("%-12s %-8s %-20s %-8s\n", c.ID[:8], "—", "—", "—")
+		stats := getContainerStats(client, c.ID)
+		if stats == nil {
+			fmt.Printf("%-14s %-8s %-20s %-8s %-10s %-10s\n", c.ID[:12], "—", "—", "—", "—", "—")
 			continue
 		}
 
@@ -83,8 +85,27 @@ func runStats(cmd *cobra.Command, args []string) error {
 		if c.Resources.PidsMax > 0 {
 			pidsStr = fmt.Sprintf("%d/%d", stats.PidsCount, c.Resources.PidsMax)
 		}
+		rxStr := humanBytes(stats.NetworkRxBytes)
+		txStr := humanBytes(stats.NetworkTxBytes)
 
-		fmt.Printf("%-12s %-8s %-20s %-8s\n", c.ID[:8], cpuStr, memStr, pidsStr)
+		fmt.Printf("%-14s %-8s %-20s %-8s %-10s %-10s\n",
+			c.ID[:12], cpuStr, memStr, pidsStr, rxStr, txStr)
+	}
+
+	return nil
+}
+
+// getContainerStats tries metrics.latest first, falls back to containers.stats (live cgroup).
+func getContainerStats(client *daemon.Client, containerID string) *store.MetricPoint {
+	// Try stored metrics first
+	var metric store.MetricPoint
+	if err := client.Call("metrics.latest", map[string]string{"container_id": containerID}, &metric); err == nil {
+		return &metric
+	}
+
+	// Fall back to live cgroup stats
+	if err := client.Call("containers.stats", map[string]string{"container_id": containerID}, &metric); err == nil {
+		return &metric
 	}
 
 	return nil
@@ -96,4 +117,18 @@ func formatMemory(current, limit int64) string {
 		return fmt.Sprintf("%s/%s", currentStr, formatBytes(limit))
 	}
 	return currentStr
+}
+
+// humanBytes formats byte counts in human-readable form.
+func humanBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }

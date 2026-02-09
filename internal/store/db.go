@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -16,6 +17,7 @@ var (
 	bucketDeploys    = []byte("deploys")
 	bucketSecrets       = []byte("secrets")
 	bucketHealthResults = []byte("health_results")
+	bucketMetrics       = []byte("metrics")
 )
 
 // Store provides persistent state storage using BBolt.
@@ -56,6 +58,11 @@ type Store interface {
 	GetHealthResults(containerID string, limit int) ([]*HealthResult, error)
 	GetLatestHealthResult(containerID string) (*HealthResult, error)
 	PruneHealthResults(containerID string, keep int) error
+
+	// Metric operations
+	CreateMetricPoint(containerID string, metric *MetricPoint) error
+	GetMetrics(containerID string, start, end time.Time, limit int) ([]*MetricPoint, error)
+	PruneMetrics(before time.Time) error
 
 	// Lifecycle
 	Close() error
@@ -99,6 +106,7 @@ func (s *BoltStore) initBuckets() error {
 			bucketDeploys,
 			bucketSecrets,
 			bucketHealthResults,
+			bucketMetrics,
 		}
 
 		for _, name := range buckets {

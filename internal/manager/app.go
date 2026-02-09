@@ -17,14 +17,15 @@ import (
 
 // AppManager orchestrates application lifecycle operations.
 type AppManager struct {
-	runtime       runtime.Runtime
-	store         store.Store
-	network       network.NetworkManager
-	reconciler    *Reconciler
-	secretManager *store.SecretManager
-	healthMonitor *health.HealthMonitor
-	logger        *slog.Logger
-	mu            sync.Mutex
+	runtime          runtime.Runtime
+	store            store.Store
+	network          network.NetworkManager
+	reconciler       *Reconciler
+	secretManager    *store.SecretManager
+	healthMonitor    *health.HealthMonitor
+	metricsCollector *health.MetricsCollector
+	logger           *slog.Logger
+	mu               sync.Mutex
 }
 
 // NewAppManager creates a new AppManager.
@@ -52,6 +53,16 @@ func (m *AppManager) SetHealthMonitor(hm *health.HealthMonitor) {
 // GetHealthMonitor returns the health monitor (may be nil).
 func (m *AppManager) GetHealthMonitor() *health.HealthMonitor {
 	return m.healthMonitor
+}
+
+// SetMetricsCollector sets the metrics collector for continuous resource monitoring.
+func (m *AppManager) SetMetricsCollector(mc *health.MetricsCollector) {
+	m.metricsCollector = mc
+}
+
+// GetMetricsCollector returns the metrics collector (may be nil).
+func (m *AppManager) GetMetricsCollector() *health.MetricsCollector {
+	return m.metricsCollector
 }
 
 // GetReconciler returns the manager's reconciler for use by the daemon.
@@ -170,6 +181,11 @@ func (m *AppManager) RemoveApp(ctx context.Context, appName string) error {
 
 	// Stop and remove each container
 	for _, c := range containers {
+		// Deregister from metrics collector
+		if m.metricsCollector != nil {
+			m.metricsCollector.DeregisterContainer(c.ID)
+		}
+
 		// Deregister from health monitor
 		if m.healthMonitor != nil {
 			m.healthMonitor.DeregisterContainer(c.ID)
@@ -298,7 +314,10 @@ func (m *AppManager) RestartContainer(ctx context.Context, containerID string, a
 		return fmt.Errorf("app not found: %w", err)
 	}
 
-	// Deregister from health monitor before stopping
+	// Deregister from metrics collector and health monitor before stopping
+	if m.metricsCollector != nil {
+		m.metricsCollector.DeregisterContainer(containerID)
+	}
 	if m.healthMonitor != nil {
 		m.healthMonitor.DeregisterContainer(containerID)
 	}
@@ -366,10 +385,13 @@ func (m *AppManager) RestartContainer(ctx context.Context, containerID string, a
 	newContainer.StartedAt = &now
 	m.store.UpdateContainer(newContainer)
 
-	// Re-register with health monitor
+	// Re-register with health monitor and metrics collector
 	if m.healthMonitor != nil {
 		check := buildHealthCheck(nil, newContainer) // Default health check
 		m.healthMonitor.RegisterContainer(newContainer.ID, appID, check)
+	}
+	if m.metricsCollector != nil {
+		m.metricsCollector.RegisterContainer(newContainer.ID)
 	}
 
 	m.logger.Info("container restarted",

@@ -37,23 +37,25 @@ type ErrorResponse struct {
 
 // Handler dispatches requests to the appropriate manager methods.
 type Handler struct {
-	manager       *manager.AppManager
-	runtime       runtime.Runtime
-	secretManager *store.SecretManager
-	network       network.NetworkManager
-	healthMonitor *health.HealthMonitor
-	logger        *slog.Logger
+	manager          *manager.AppManager
+	runtime          runtime.Runtime
+	secretManager    *store.SecretManager
+	network          network.NetworkManager
+	healthMonitor    *health.HealthMonitor
+	metricsCollector *health.MetricsCollector
+	logger           *slog.Logger
 }
 
 // NewHandler creates a new request handler.
-func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, net network.NetworkManager, hm *health.HealthMonitor, logger *slog.Logger) *Handler {
+func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, net network.NetworkManager, hm *health.HealthMonitor, mc *health.MetricsCollector, logger *slog.Logger) *Handler {
 	return &Handler{
-		manager:       mgr,
-		runtime:       rt,
-		secretManager: sm,
-		network:       net,
-		healthMonitor: hm,
-		logger:        logger,
+		manager:          mgr,
+		runtime:          rt,
+		secretManager:    sm,
+		network:          net,
+		healthMonitor:    hm,
+		metricsCollector: mc,
+		logger:           logger,
 	}
 }
 
@@ -110,6 +112,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleHealthStatus(ctx, conn, req.Params)
 	case "health.all":
 		h.handleHealthAll(ctx, conn)
+	case "metrics.get":
+		h.handleMetricsGet(ctx, conn, req.Params)
+	case "metrics.latest":
+		h.handleMetricsLatest(ctx, conn, req.Params)
 	case "cert.list":
 		h.handleCertList(ctx, conn)
 	case "cert.import":
@@ -520,6 +526,53 @@ func (h *Handler) handleCertImport(ctx context.Context, conn net.Conn, params js
 	}
 
 	h.writeData(conn, map[string]string{"status": "imported"})
+}
+
+func (h *Handler) handleMetricsGet(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		ContainerID string    `json:"container_id"`
+		Start       time.Time `json:"start"`
+		End         time.Time `json:"end"`
+		Limit       int       `json:"limit"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+
+	if h.metricsCollector == nil {
+		h.writeError(conn, "METRICS_UNAVAILABLE", "metrics collector not initialized")
+		return
+	}
+
+	metrics, err := h.metricsCollector.GetMetrics(p.ContainerID, p.Start, p.End, p.Limit)
+	if err != nil {
+		h.writeError(conn, "METRICS_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, metrics)
+}
+
+func (h *Handler) handleMetricsLatest(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		ContainerID string `json:"container_id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+
+	if h.metricsCollector == nil {
+		h.writeError(conn, "METRICS_UNAVAILABLE", "metrics collector not initialized")
+		return
+	}
+
+	metric, err := h.metricsCollector.GetLatestMetrics(p.ContainerID)
+	if err != nil {
+		h.writeError(conn, "METRICS_FAILED", err.Error())
+		return
+	}
+	h.writeData(conn, metric)
 }
 
 // writeData sends a successful response.
