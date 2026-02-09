@@ -1,3 +1,3 @@
 package api
 
-// TODO(vessel): Implement deploy-related API handlers
+// Deploy-related handlers are implemented in handlers.go.

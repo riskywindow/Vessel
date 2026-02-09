@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vessel/vessel/internal/api"
+	"github.com/vessel/vessel/internal/config"
 	"github.com/vessel/vessel/internal/health"
 	"github.com/vessel/vessel/internal/manager"
 	"github.com/vessel/vessel/internal/network"
@@ -36,6 +38,7 @@ type Daemon struct {
 	healthMonitor    *health.HealthMonitor
 	restarter        *health.AutoRestarter
 	metricsCollector *health.MetricsCollector
+	apiServer        *api.Server
 	logger           *slog.Logger
 	socket           net.Listener
 	stopCh           chan struct{}
@@ -237,6 +240,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start API server if configured
+	if err := d.startAPIServer(); err != nil {
+		d.logger.Warn("failed to start API server", "error", err)
+	}
+
 	// Start the reconciliation loop
 	reconcileCtx, reconcileCancel := context.WithCancel(ctx)
 	d.wg.Add(1)
@@ -309,6 +317,15 @@ func (d *Daemon) shutdown() error {
 		d.logger.Warn("shutdown timed out, forcing exit")
 	}
 
+	// Stop API server
+	if d.apiServer != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := d.apiServer.Stop(stopCtx); err != nil {
+			d.logger.Error("failed to stop API server", "error", err)
+		}
+		stopCancel()
+	}
+
 	// Stop metrics collector
 	if d.metricsCollector != nil {
 		d.metricsCollector.Stop()
@@ -373,6 +390,46 @@ func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 
 	handler := NewHandler(d.manager, d.runtime, d.store, d.secretManager, d.network, d.healthMonitor, d.metricsCollector, d.logger)
 	handler.Handle(ctx, conn)
+}
+
+// startAPIServer creates and starts the HTTP API server if configured.
+func (d *Daemon) startAPIServer() error {
+	cfg, err := config.Load("vessel.toml")
+	if err != nil {
+		// No config or parse error — API not enabled
+		return nil
+	}
+
+	if !cfg.API.Enabled {
+		return nil
+	}
+
+	handler := api.NewHandler(
+		d.manager,
+		d.runtime,
+		d.store,
+		d.secretManager,
+		d.network,
+		d.healthMonitor,
+		d.metricsCollector,
+	)
+
+	d.apiServer = api.NewServer(handler, api.Config{
+		Addr:      cfg.API.Addr,
+		APIKeys:   cfg.API.APIKeys,
+		CORSHosts: cfg.API.CORSHosts,
+	}, d.logger)
+
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		if err := d.apiServer.Start(); err != nil {
+			d.logger.Error("API server error", "error", err)
+		}
+	}()
+
+	d.logger.Info("API server started", "addr", cfg.API.Addr)
+	return nil
 }
 
 // IsRunning checks if a daemon is currently running by attempting to connect to the socket.

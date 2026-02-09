@@ -11,6 +11,9 @@ type Config struct {
 	APIAddress string `toml:"api_address" json:"api_address"`
 	APIPort    int    `toml:"api_port" json:"api_port"`
 
+	// API configures the REST API server for the web dashboard.
+	API APIConfig `toml:"api" json:"api"`
+
 	// Alerting configures webhook alerting for health status changes.
 	Alerting AlertingConfig `toml:"alerting" json:"alerting"`
 
@@ -19,6 +22,22 @@ type Config struct {
 
 	// Remotes is a list of remote server configurations for SSH deployment.
 	Remotes []RemoteConfig `toml:"remote" json:"remotes,omitempty"`
+}
+
+// APIConfig configures the REST API server.
+type APIConfig struct {
+	// Enabled controls whether the API server is started with the daemon.
+	Enabled bool `toml:"enabled" json:"enabled"`
+
+	// Addr is the listen address (e.g., ":8080", "0.0.0.0:9090").
+	Addr string `toml:"addr" json:"addr"`
+
+	// APIKeys is a list of valid API keys for authentication.
+	// If empty, no authentication is required.
+	APIKeys []string `toml:"api_keys" json:"api_keys,omitempty"`
+
+	// CORSHosts is a list of allowed CORS origins for the dashboard.
+	CORSHosts []string `toml:"cors_hosts" json:"cors_hosts,omitempty"`
 }
 
 // AlertingConfig configures webhook alerting behavior.

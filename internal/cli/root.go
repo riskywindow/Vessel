@@ -62,6 +62,7 @@ func init() {
 	rootCmd.AddCommand(completionCmd)
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(remoteCmd)
+	rootCmd.AddCommand(apiCmd)
 
 	// Register network subcommands
 	networkCmd.AddCommand(networkStatusCmd)

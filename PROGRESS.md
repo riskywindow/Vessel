@@ -5,9 +5,9 @@
 
 ---
 
-## Current Phase: PHASE 5 — CLI Polish & Remote Deploy
+## Current Phase: PHASE 6 — Web Dashboard
 
-### Status: COMPLETE (Session 4 — SSH remote deploy & remote management)
+### Status: IN PROGRESS (Session 1 — REST API Layer)
 
 ---
 
@@ -172,12 +172,12 @@
 - [x] `vessel doctor` — system prerequisites check (Session 16)
 - [x] `vessel fmt` — config validation and formatting (moved to Phase 2 Week 7)
 
-## Phase 6: Web Dashboard (Weeks 12-13) — NOT STARTED
+## Phase 6: Web Dashboard (Weeks 12-13) — IN PROGRESS
 
 ### Week 12: Backend API + Dashboard Skeleton
-- [ ] REST API for all operations
+- [x] REST API for all operations (Session 19)
 - [ ] WebSocket endpoints for logs and metrics
-- [ ] API key authentication
+- [x] API key authentication (Session 19)
 - [ ] React + TypeScript + Tailwind scaffold
 - [ ] App list view
 - [ ] Embed frontend into Go binary
@@ -1268,3 +1268,128 @@
 - SSH client in standalone `internal/ssh/` package (no dependency on cli or daemon)
 
 **Phase 5 is COMPLETE. Next: Phase 6 — Web Dashboard**
+
+### Session 19 — 2026-02-09 ✅
+**Task:** Phase 6 Session 1 — REST API Layer for Web Dashboard
+
+**Completed:**
+- Added Chi router dependency (`github.com/go-chi/chi/v5` v5.2.5)
+- Added CORS middleware dependency (`github.com/go-chi/cors` v1.2.2)
+- Implemented REST API server (`internal/api/server.go`, ~223 lines):
+  - `Server` struct with Chi router, HTTP server lifecycle
+  - `Config` struct: Addr, APIKeys, CORSHosts
+  - `NewServer()`: middleware stack (RequestID, RealIP, Recoverer, Timeout, CORS, auth)
+  - `setupRoutes()`: 25+ route registrations across 8 resource groups
+  - `Start()`/`Stop()`: graceful server lifecycle
+  - `apiKeyAuth()`: middleware supporting X-API-Key header and Bearer token
+  - `writeJSON()`/`writeError()`: consistent JSON response helpers
+- Implemented API handlers (`internal/api/handlers.go`, ~370 lines):
+  - `Handler` struct wrapping manager, runtime, store, secretManager, network, healthMonitor, metricsCollector
+  - `NewHandler()`: 7 parameters (all optional except manager, runtime, store)
+  - 25 endpoint handlers:
+    - Ping: server health check
+    - Apps: ListApps, GetApp (with containers), StopApp, RemoveApp, RestartApp, DeployApp, RollbackApp, GetDeployHistory
+    - Containers: ListContainers (with ?app filter), GetContainer, GetContainerLogs, GetContainerStats
+    - Health: GetAllHealth, GetHealthStatus, CheckHealthNow, GetHealthHistory
+    - Metrics: GetMetrics (time range + limit), GetLatestMetrics
+    - Secrets: ListSecrets, SetSecret (with key validation), DeleteSecret
+    - Network: GetNetworkRoutes
+    - Certs: ListCerts, ImportCert
+    - System: GetSystemInfo (version, app/container counts)
+- Added `APIConfig` to config types (`internal/config/types.go`):
+  - `APIConfig` struct: Enabled, Addr, APIKeys, CORSHosts
+  - Added `API APIConfig` field to `Config` struct
+  - Supports `[api]` TOML section in vessel.toml
+- Integrated API server into daemon (`internal/daemon/daemon.go`):
+  - Added `apiServer` field to Daemon struct
+  - `startAPIServer()`: reads vessel.toml, creates handler + server if `[api] enabled = true`
+  - Starts in background goroutine (added to WaitGroup)
+  - Graceful shutdown with 5s timeout in daemon's shutdown sequence
+- Created `vessel api key-generate` CLI command (`internal/cli/api.go`, ~55 lines):
+  - Generates 32-byte cryptographically random key
+  - Base64 URL-safe encoding
+  - Displays key and vessel.toml configuration example
+  - Supports `--json` output mode
+  - Registered `apiCmd` in root.go (now 21 subcommands)
+- Updated stub files (routes.go, handlers_apps.go, handlers_deploys.go, handlers_logs.go, handlers_metrics.go, middleware.go, websocket.go) with proper comments pointing to implementation files
+- Wrote comprehensive test suite (`internal/api/api_test.go`, 42 tests):
+  - Ping: returns OK, no auth required with auth configured
+  - Auth: blocks unauthenticated, accepts X-API-Key, accepts Bearer token, rejects invalid key, allows all when no keys configured
+  - CORS: headers present on OPTIONS preflight
+  - Apps: list empty, list with apps, get not found, get found (with containers), stop not found, remove not found
+  - Containers: list empty, list with containers, filter by app, get not found, get found
+  - Health: get all (nil monitor), get status (nil monitor), check now (nil monitor), get history
+  - Metrics: get metrics (nil collector), get latest (nil collector)
+  - Secrets: list (nil manager), set (nil manager), delete (nil manager), set invalid JSON, set empty key
+  - Network: routes (nil manager)
+  - Certs: list (nil network), import (nil network)
+  - System: system info with running/stopped containers
+  - Content: JSON content type, error response format
+  - Server: default addr (:8080), custom addr, start/stop lifecycle
+  - Deploy: invalid JSON
+  - Rollback: invalid JSON
+  - Logs: container logs with mock runtime
+  - Stats: container stats with mock runtime
+  - Config: TOML parsing of [api] section
+  - Handler: nil components don't panic
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 14 packages pass
+- `go vet ./...` — clean
+- api: 42 tests (new package)
+- cli: 37 tests
+- config: 30, daemon: 10, health: 62, manager: 83, network: 60, runtime: 24, store: 27
+- progress: 18, styles: 17, ssh: 15
+- **Total: ~425 unit tests across all packages**
+
+**Dependencies Added:**
+- `github.com/go-chi/chi/v5` v5.2.5 (HTTP router)
+- `github.com/go-chi/cors` v1.2.2 (CORS middleware)
+
+**Architecture Decisions:**
+- Chi router chosen over stdlib ServeMux for middleware support and URL parameter extraction
+- API server is optional — only starts if `[api] enabled = true` in vessel.toml
+- API key auth supports both `X-API-Key` header and `Authorization: Bearer` token
+- Ping endpoint (`/api/ping`) bypasses auth for health checking
+- All optional components (secretManager, healthMonitor, metricsCollector, network) nil-safe
+- API handlers wrap the same manager/runtime/store used by the daemon socket handlers
+- Response format: `{"data": ...}` for success, `{"error": {"code": "...", "message": "..."}}` for errors
+- GetApp returns both app and containers for rich app detail views
+- ListContainers supports `?app=` query parameter for filtering
+- CORS defaults to `*` if no CORSHosts configured
+- API server shuts down before other daemon components (5s timeout)
+- Chi router registered in root.go — now 21 subcommands total
+
+**API Routes:**
+```
+GET    /api/ping                          # Health check (no auth)
+GET    /api/apps                          # List all apps
+GET    /api/apps/{name}                   # Get app detail + containers
+DELETE /api/apps/{name}                   # Remove app
+POST   /api/apps/{name}/stop              # Stop app
+POST   /api/apps/{name}/restart           # Restart app
+POST   /api/apps/{name}/deploy            # Deploy app
+POST   /api/apps/{name}/rollback          # Rollback app
+GET    /api/apps/{name}/history           # Deploy history
+GET    /api/containers                    # List containers (?app= filter)
+GET    /api/containers/{id}               # Get container
+GET    /api/containers/{id}/logs          # Container logs (?tail=)
+GET    /api/containers/{id}/stats         # Container stats
+GET    /api/health                        # All health status
+GET    /api/health/{id}                   # Container health
+POST   /api/health/{id}/check             # Immediate health check
+GET    /api/health/{id}/history           # Health check history
+GET    /api/metrics/{id}                  # Container metrics (?start=&end=&limit=)
+GET    /api/metrics/{id}/latest           # Latest metrics
+GET    /api/secrets                       # List secret keys
+POST   /api/secrets                       # Set secret
+DELETE /api/secrets/{key}                 # Delete secret
+GET    /api/network/routes                # Routing table
+GET    /api/certs                         # TLS cert info
+POST   /api/certs                         # Import cert
+GET    /api/system                        # System info
+```
+
+**Next:**
+- Phase 6 continued: WebSocket endpoints for log/metric streaming, React dashboard scaffold

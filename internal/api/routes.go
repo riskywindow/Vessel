@@ -1,3 +1,3 @@
 package api
 
-// TODO(vessel): Implement route registration
+// Routes are registered in server.go via setupRoutes().

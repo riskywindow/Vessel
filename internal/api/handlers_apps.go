@@ -1,3 +1,3 @@
 package api
 
-// TODO(vessel): Implement app-related API handlers
+// App-related handlers are implemented in handlers.go.

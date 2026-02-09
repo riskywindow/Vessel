@@ -1,3 +1,3 @@
 package api
 
-// TODO(vessel): Implement metrics handlers
+// Metrics handlers are implemented in handlers.go.
