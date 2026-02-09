@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vessel/vessel/internal/config"
+	"github.com/vessel/vessel/internal/health"
 	"github.com/vessel/vessel/internal/manager"
 	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/runtime"
@@ -40,16 +41,18 @@ type Handler struct {
 	runtime       runtime.Runtime
 	secretManager *store.SecretManager
 	network       network.NetworkManager
+	healthMonitor *health.HealthMonitor
 	logger        *slog.Logger
 }
 
 // NewHandler creates a new request handler.
-func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, net network.NetworkManager, logger *slog.Logger) *Handler {
+func NewHandler(mgr *manager.AppManager, rt runtime.Runtime, sm *store.SecretManager, net network.NetworkManager, hm *health.HealthMonitor, logger *slog.Logger) *Handler {
 	return &Handler{
 		manager:       mgr,
 		runtime:       rt,
 		secretManager: sm,
 		network:       net,
+		healthMonitor: hm,
 		logger:        logger,
 	}
 }
@@ -103,6 +106,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleSecretDelete(ctx, conn, req.Params)
 	case "network.routes":
 		h.handleNetworkRoutes(ctx, conn)
+	case "health.status":
+		h.handleHealthStatus(ctx, conn, req.Params)
+	case "health.all":
+		h.handleHealthAll(ctx, conn)
 	case "cert.list":
 		h.handleCertList(ctx, conn)
 	case "cert.import":
@@ -431,6 +438,41 @@ func (h *Handler) handleNetworkRoutes(ctx context.Context, conn net.Conn) {
 		return
 	}
 	h.writeData(conn, map[string][]network.RouteTarget{})
+}
+
+func (h *Handler) handleHealthStatus(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		ContainerID string `json:"container_id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+
+	if h.healthMonitor == nil {
+		h.writeError(conn, "HEALTH_UNAVAILABLE", "health monitor not initialized")
+		return
+	}
+
+	status, err := h.healthMonitor.GetStatus(p.ContainerID)
+	if err != nil {
+		h.writeError(conn, "HEALTH_FAILED", err.Error())
+		return
+	}
+	if status == nil {
+		h.writeError(conn, "NOT_MONITORED", "container not being monitored")
+		return
+	}
+	h.writeData(conn, status)
+}
+
+func (h *Handler) handleHealthAll(ctx context.Context, conn net.Conn) {
+	if h.healthMonitor == nil {
+		h.writeData(conn, map[string]*health.ContainerHealth{})
+		return
+	}
+
+	h.writeData(conn, h.healthMonitor.GetAllStatus())
 }
 
 func (h *Handler) handleCertList(ctx context.Context, conn net.Conn) {

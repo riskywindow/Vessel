@@ -127,6 +127,9 @@ func (m *AppManager) deployNewApp(ctx context.Context, appCfg *config.AppConfig,
 
 		// Register routes for each configured domain
 		m.registerContainerRoutes(c, appCfg)
+
+		// Register with continuous health monitor
+		m.registerHealthMonitor(c, appCfg)
 	}
 
 	// Register DNS for the app (best-effort)
@@ -197,6 +200,9 @@ func (m *AppManager) deployRolling(ctx context.Context, app *store.App, appCfg *
 
 		// Register routes for the new container
 		m.registerContainerRoutes(newC, appCfg)
+
+		// Register with continuous health monitor
+		m.registerHealthMonitor(newC, appCfg)
 
 		// Remove one old container (if available)
 		if i < len(oldContainers) {
@@ -286,6 +292,7 @@ func (m *AppManager) deployBlueGreen(ctx context.Context, app *store.App, appCfg
 	m.logger.Info("blue-green: all instances healthy, swapping traffic", "app", appCfg.Name)
 	for _, newC := range newContainers {
 		m.registerContainerRoutes(newC, appCfg)
+		m.registerHealthMonitor(newC, appCfg)
 	}
 
 	// Wait drain timeout for in-flight requests to old containers
@@ -436,6 +443,11 @@ func (m *AppManager) getRunningContainers(appID string) ([]*store.Container, err
 
 // stopAndRemoveContainer stops and removes a single container.
 func (m *AppManager) stopAndRemoveContainer(ctx context.Context, c *store.Container) {
+	// Deregister from health monitor
+	if m.healthMonitor != nil {
+		m.healthMonitor.DeregisterContainer(c.ID)
+	}
+
 	// Deregister routes before teardown so proxy stops sending traffic
 	if m.network != nil {
 		if err := m.network.DeregisterRoute("", c.ID); err != nil {
@@ -623,6 +635,19 @@ func (m *AppManager) registerContainerRoutes(c *store.Container, appCfg *config.
 		if err := m.network.RegisterRoute(domain, target); err != nil {
 			m.logger.Warn("failed to register route", "domain", domain, "container", c.ID[:12], "error", err)
 		}
+	}
+}
+
+// registerHealthMonitor registers a container with the continuous health monitor.
+func (m *AppManager) registerHealthMonitor(c *store.Container, appCfg *config.AppConfig) {
+	if m.healthMonitor == nil {
+		return
+	}
+
+	check := buildHealthCheck(appCfg.HealthCheck, c)
+	if err := m.healthMonitor.RegisterContainer(c.ID, c.AppID, check); err != nil {
+		m.logger.Warn("failed to register container with health monitor",
+			"container", c.ID[:12], "error", err)
 	}
 }
 

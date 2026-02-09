@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 4 — Health Monitoring & Reliability
 
-### Status: NOT STARTED (Phase 3 COMPLETE)
+### Status: IN PROGRESS (Session 1 COMPLETE — Health Monitor & Auto-Restart)
 
 ---
 
@@ -126,15 +126,23 @@
 - [x] Custom certificate support — COMPLETE (Session 11)
 - [x] `vessel cert list` and `vessel cert import` CLI commands — COMPLETE (Session 11)
 
-## Phase 4: Health Monitoring & Reliability (Week 10) — NOT STARTED
-- [ ] Implement HTTP health checks
-- [ ] Implement TCP health checks
-- [ ] Implement command health checks
-- [ ] Auto-restart with exponential backoff
+## Phase 4: Health Monitoring & Reliability (Week 10) — IN PROGRESS
+### Session 1: Continuous Health Monitor & Auto-Restart ✅
+- [x] Implement HTTP health checks (shared in health/checker.go)
+- [x] Implement TCP health checks (shared in health/checker.go)
+- [x] Implement command health checks (shared in health/checker.go)
+- [x] Continuous health monitor (health/monitor.go)
+- [x] Auto-restart with exponential backoff (health/restarter.go)
+- [x] Health result persistence (store/health.go)
+- [x] Health monitor integration in deploy pipeline
+- [x] RestartContainer in AppManager
+- [x] Health status socket handlers (health.status, health.all)
+- [x] 41 new tests (29 health + 12 manager)
+### Remaining
 - [ ] Resource monitoring (cgroup stats)
 - [ ] Time-series metrics storage
 - [ ] Webhook alerting
-- [ ] Implement `vessel health`
+- [ ] Implement `vessel health` CLI command
 
 ## Phase 5: CLI Polish & Remote Deploy (Week 11) — NOT STARTED
 - [ ] Styled terminal output (lipgloss)
@@ -693,3 +701,106 @@
 - WebSocket proxying deferred to Phase 5 (not in scope for Phase 3)
 
 **Phase 3 is COMPLETE. Next: Phase 4 — Health Monitoring & Reliability**
+
+### Session 12 — 2026-02-09 ✅
+**Task:** Phase 4 Session 1 — Continuous Health Monitor & Auto-Restart
+
+**Completed:**
+- Created shared health check functions (`internal/health/checker.go`, ~75 lines):
+  - `ExecuteCheck()`: dispatches to HTTP, TCP, or command check
+  - `ExecuteHTTPCheck()`: HTTP GET, expects 2xx response
+  - `ExecuteTCPCheck()`: TCP connection test
+  - `ExecuteCommandCheck()`: exec command in container via runtime
+  - Updated `internal/manager/health.go` to delegate to shared implementations
+- Implemented continuous health monitor (`internal/health/monitor.go`, ~345 lines):
+  - `HealthMonitor` struct with periodic check loop
+  - `RegisterContainer()`/`DeregisterContainer()` for container lifecycle
+  - Configurable thresholds: unhealthy (3 consecutive fails), healthy (1 success)
+  - Default 10s check interval
+  - Status tracking per container (ContainerHealth with last check, failures, etc.)
+  - Event emission on status change via subscriber channels
+  - `Subscribe()`/`Unsubscribe()` for health event consumers
+  - `GetStatus()`/`GetAllStatus()` for querying health state
+  - Thread-safe: RWMutex for containers, separate lock for subscribers
+  - Store operations and event emission happen outside lock
+  - Triggers auto-restart when unhealthy threshold reached
+  - Resets backoff when container recovers to healthy
+- Implemented auto-restarter (`internal/health/restarter.go`, ~200 lines):
+  - `AutoRestarter` with pending restart queue (buffered channel)
+  - `AppRestarter` interface for manager integration (avoids circular deps)
+  - Exponential backoff: 1s initial, 2x multiplier, 5m max
+  - `RequestRestart()`: non-blocking queue submission
+  - `handleRestart()`: enforces backoff, calls manager's RestartContainer
+  - `ResetBackoff()`: clears state on recovery
+  - `CalculateDelay()`: exported for testing
+  - `SetManager()`: deferred wiring to break init-time circular dependency
+  - Graceful shutdown: context cancellation exits backoff waits
+  - Restart count incremented in store on success
+- Implemented health result persistence (`internal/store/health.go`, ~115 lines):
+  - Added `bucketHealthResults` bucket to BoltStore
+  - `CreateHealthResult()`: keyed by "containerID:RFC3339Nano"
+  - `GetHealthResults()`: reverse chronological, with limit
+  - `GetLatestHealthResult()`: convenience wrapper
+  - `PruneHealthResults()`: keeps N most recent per container
+  - Added 4 methods to Store interface in db.go
+- Added `RestartContainer()` to AppManager (`internal/manager/app.go`):
+  - Deregisters from health monitor, tears down networking
+  - Stops + removes old container
+  - Creates + starts new container with same config
+  - Sets up networking on new container
+  - Re-registers with health monitor
+  - Increments RestartCount from old container
+  - Implements `health.AppRestarter` interface
+- Integrated health monitor into deploy pipeline (`internal/manager/deploy.go`):
+  - `registerHealthMonitor()`: registers containers after health check passes
+  - Called in `deployNewApp`, `deployRolling`, `deployBlueGreen`
+  - Deregisters in `stopAndRemoveContainer`
+  - Added `SetHealthMonitor()`/`GetHealthMonitor()` to AppManager
+- Wired health components into daemon (`internal/daemon/daemon.go`):
+  - Creates AutoRestarter and HealthMonitor in NewDaemon
+  - Wires restarter → manager, health monitor → manager
+  - Starts restarter + monitor before reconciler
+  - Stops monitor + restarter during shutdown
+- Added socket handlers (`internal/daemon/socket.go`):
+  - `health.status`: returns ContainerHealth for a specific container
+  - `health.all`: returns all monitored container health states
+  - NewHandler now takes 6 args (added HealthMonitor)
+- Updated RemoveApp to deregister containers from health monitor
+- Wrote comprehensive test suite (41 new tests):
+  - `internal/health/health_test.go` (29 tests):
+    - Checker: HTTP success/failure, TCP success/failure, command success/failure, dispatch
+    - Monitor: register/deregister, getAll, unhealthy threshold, healthy threshold,
+      event emission, subscription, deregister during check, stop cleanup, default config,
+      restarter integration
+    - Restarter: delay calculation, backoff reset, setManager, request restart,
+      backoff delays, queue full, stop during backoff
+    - Store: create/get, multiple results, prune, no results, prune noop
+  - `internal/manager/health_test.go` (12 tests):
+    - RestartContainer: success, app not found, container not found, create fails, with network
+    - Deploy integration: registers with health monitor, deregisters on stop,
+      re-registers on restart, AppManager implements AppRestarter
+    - Rolling/blue-green: both register with health monitor
+    - End-to-end: health monitor triggers restart of unhealthy container
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 8 packages pass
+- `go vet ./...` — clean
+- health: 29 tests (new package)
+- manager: 76 tests (was 64, +12 new)
+- config: 24, daemon: 10, network: 60, runtime: 7, store: 26
+- **Total: ~232 unit tests across all packages**
+
+**Architecture Decisions:**
+- Health checks shared between deploy-time and continuous monitoring (health/checker.go)
+- manager/health.go delegates to health.ExecuteCheck (no duplication)
+- AppRestarter interface in health package, implemented by manager.AppManager (no circular deps)
+- AutoRestarter uses SetManager() for deferred wiring (breaks init-time cycle)
+- Health monitor stores results on every check (best-effort, outside lock)
+- Backoff: 1s → 2s → 4s → 8s → ... → 5m cap; reset on recovery
+- Health monitor optional (nil-safe) throughout AppManager
+- RemoveApp deregisters containers from health monitor
+- Socket handler NewHandler takes 6 args (added HealthMonitor, can be nil)
+
+**Next:**
+- Phase 4 Session 2: Resource monitoring (cgroup stats), time-series metrics, `vessel health` CLI

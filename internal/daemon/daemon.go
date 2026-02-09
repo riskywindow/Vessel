@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vessel/vessel/internal/health"
 	"github.com/vessel/vessel/internal/manager"
 	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/paths"
@@ -32,6 +33,8 @@ type Daemon struct {
 	network       network.NetworkManager
 	manager       *manager.AppManager
 	secretManager *store.SecretManager
+	healthMonitor *health.HealthMonitor
+	restarter     *health.AutoRestarter
 	logger        *slog.Logger
 	socket        net.Listener
 	stopCh        chan struct{}
@@ -84,12 +87,29 @@ func NewDaemon(logger *slog.Logger) (*Daemon, error) {
 		mgr.SetSecretManager(sm)
 	}
 
+	// Create auto-restarter (manager set below to avoid circular init)
+	restarter := health.NewAutoRestarter(st, nil, logger)
+
+	// Create health monitor
+	healthCfg := health.HealthMonitorConfig{
+		CheckInterval:      10 * time.Second,
+		UnhealthyThreshold: 3,
+		HealthyThreshold:   1,
+	}
+	healthMonitor := health.NewHealthMonitor(rt, st, restarter, healthCfg, logger)
+
+	// Wire restarter to manager, and health monitor to manager
+	restarter.SetManager(mgr)
+	mgr.SetHealthMonitor(healthMonitor)
+
 	return &Daemon{
 		runtime:       rt,
 		store:         st,
 		network:       netIface,
 		manager:       mgr,
 		secretManager: sm,
+		healthMonitor: healthMonitor,
+		restarter:     restarter,
 		logger:        logger,
 		stopCh:        make(chan struct{}),
 	}, nil
@@ -149,6 +169,11 @@ func (d *Daemon) GetSecretManager() *store.SecretManager {
 	return d.secretManager
 }
 
+// GetHealthMonitor returns the daemon's health monitor.
+func (d *Daemon) GetHealthMonitor() *health.HealthMonitor {
+	return d.healthMonitor
+}
+
 // Start starts the daemon. It blocks until the context is cancelled or Stop is called.
 func (d *Daemon) Start(ctx context.Context) error {
 	d.logger.Info("starting vessel daemon")
@@ -178,6 +203,18 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 
 	d.logger.Info("listening on socket", "path", paths.SocketPath)
+
+	// Start health monitoring
+	if d.restarter != nil {
+		if err := d.restarter.Start(ctx); err != nil {
+			d.logger.Warn("failed to start auto-restarter", "error", err)
+		}
+	}
+	if d.healthMonitor != nil {
+		if err := d.healthMonitor.Start(ctx); err != nil {
+			d.logger.Warn("failed to start health monitor", "error", err)
+		}
+	}
 
 	// Start the reconciliation loop
 	reconcileCtx, reconcileCancel := context.WithCancel(ctx)
@@ -251,6 +288,14 @@ func (d *Daemon) shutdown() error {
 		d.logger.Warn("shutdown timed out, forcing exit")
 	}
 
+	// Stop health monitoring
+	if d.healthMonitor != nil {
+		d.healthMonitor.Stop()
+	}
+	if d.restarter != nil {
+		d.restarter.Stop()
+	}
+
 	// Stop network manager
 	if d.network != nil {
 		if err := d.network.Stop(); err != nil {
@@ -300,7 +345,7 @@ func (d *Daemon) acceptConnections(ctx context.Context) {
 func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.network, d.logger)
+	handler := NewHandler(d.manager, d.runtime, d.secretManager, d.network, d.healthMonitor, d.logger)
 	handler.Handle(ctx, conn)
 }
 

@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"time"
 
 	"github.com/vessel/vessel/internal/config"
+	"github.com/vessel/vessel/internal/health"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
 )
@@ -134,61 +133,7 @@ func containerAddr(c *store.Container) string {
 }
 
 // executeHealthCheck performs a single health check against a container.
+// Delegates to the shared health.ExecuteCheck implementation.
 func executeHealthCheck(ctx context.Context, rt runtime.Runtime, container *store.Container, check store.HealthCheck, logger *slog.Logger) error {
-	checkCtx, cancel := context.WithTimeout(ctx, check.Timeout)
-	defer cancel()
-
-	switch check.Type {
-	case store.HealthCheckHTTP:
-		return executeHTTPCheck(checkCtx, check.Target)
-	case store.HealthCheckTCP:
-		return executeTCPCheck(checkCtx, check.Target)
-	case store.HealthCheckCommand:
-		return executeCommandCheck(checkCtx, rt, container.ID, check.Target)
-	default:
-		return fmt.Errorf("unknown health check type: %s", check.Type)
-	}
-}
-
-// executeHTTPCheck performs an HTTP GET and expects a 2xx response.
-func executeHTTPCheck(ctx context.Context, target string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("HTTP check failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP check returned status %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
-// executeTCPCheck attempts to connect to a TCP address.
-func executeTCPCheck(ctx context.Context, target string) error {
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", target)
-	if err != nil {
-		return fmt.Errorf("TCP check failed: %w", err)
-	}
-	conn.Close()
-	return nil
-}
-
-// executeCommandCheck runs a command inside the container and checks exit code.
-func executeCommandCheck(ctx context.Context, rt runtime.Runtime, containerID string, command string) error {
-	err := rt.ExecInContainer(ctx, containerID, []string{"sh", "-c", command})
-	if err != nil {
-		return fmt.Errorf("command check failed: %w", err)
-	}
-	return nil
+	return health.ExecuteCheck(ctx, rt, container.ID, check)
 }

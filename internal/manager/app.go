@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vessel/vessel/internal/config"
+	"github.com/vessel/vessel/internal/health"
 	"github.com/vessel/vessel/internal/network"
 	"github.com/vessel/vessel/internal/runtime"
 	"github.com/vessel/vessel/internal/store"
@@ -21,6 +22,7 @@ type AppManager struct {
 	network       network.NetworkManager
 	reconciler    *Reconciler
 	secretManager *store.SecretManager
+	healthMonitor *health.HealthMonitor
 	logger        *slog.Logger
 	mu            sync.Mutex
 }
@@ -40,6 +42,16 @@ func NewAppManager(rt runtime.Runtime, st store.Store, net network.NetworkManage
 // SetSecretManager sets the secret manager for deploy-time secret resolution.
 func (m *AppManager) SetSecretManager(sm *store.SecretManager) {
 	m.secretManager = sm
+}
+
+// SetHealthMonitor sets the health monitor for continuous container health checking.
+func (m *AppManager) SetHealthMonitor(hm *health.HealthMonitor) {
+	m.healthMonitor = hm
+}
+
+// GetHealthMonitor returns the health monitor (may be nil).
+func (m *AppManager) GetHealthMonitor() *health.HealthMonitor {
+	return m.healthMonitor
 }
 
 // GetReconciler returns the manager's reconciler for use by the daemon.
@@ -158,6 +170,11 @@ func (m *AppManager) RemoveApp(ctx context.Context, appName string) error {
 
 	// Stop and remove each container
 	for _, c := range containers {
+		// Deregister from health monitor
+		if m.healthMonitor != nil {
+			m.healthMonitor.DeregisterContainer(c.ID)
+		}
+
 		if c.State == store.ContainerStateRunning {
 			if err := m.runtime.StopContainer(ctx, c.ID, 10*time.Second); err != nil {
 				m.logger.Error("failed to stop container during removal", "container", c.ID[:12], "error", err)
@@ -259,6 +276,108 @@ func (m *AppManager) RestartApp(ctx context.Context, appName string) error {
 	}
 
 	m.logger.Info("app restarted", "app", appName)
+	return nil
+}
+
+// RestartContainer stops and restarts a specific container.
+// This is called by the auto-restarter when a container becomes unhealthy.
+// It implements health.AppRestarter interface.
+func (m *AppManager) RestartContainer(ctx context.Context, containerID string, appID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Get current container
+	container, err := m.store.GetContainer(containerID)
+	if err != nil {
+		return fmt.Errorf("container not found: %w", err)
+	}
+
+	// Get app
+	app, err := m.store.GetApp(appID)
+	if err != nil {
+		return fmt.Errorf("app not found: %w", err)
+	}
+
+	// Deregister from health monitor before stopping
+	if m.healthMonitor != nil {
+		m.healthMonitor.DeregisterContainer(containerID)
+	}
+
+	// Teardown networking and stop old container
+	if m.network != nil {
+		if err := m.network.DeregisterRoute("", containerID); err != nil {
+			m.logger.Warn("failed to deregister routes for restart", "container", containerID[:12], "error", err)
+		}
+		if err := m.network.TeardownContainerNetwork(ctx, containerID); err != nil {
+			m.logger.Warn("failed to teardown network for restart", "container", containerID[:12], "error", err)
+		}
+	}
+
+	if err := m.runtime.StopContainer(ctx, containerID, 10*time.Second); err != nil {
+		m.logger.Warn("failed to stop container for restart", "container", containerID[:12], "error", err)
+	}
+
+	if err := m.runtime.RemoveContainer(ctx, containerID); err != nil {
+		m.logger.Warn("failed to remove container for restart", "container", containerID[:12], "error", err)
+	}
+
+	m.store.DeleteContainer(containerID)
+
+	// Create and start a new container with the same config
+	envList := buildEnvList(app.Env)
+	newContainer, err := m.runtime.CreateContainer(ctx, runtime.ContainerOpts{
+		Name:      fmt.Sprintf("%s-%d", app.Name, time.Now().UnixNano()%10000),
+		Image:     app.Image,
+		Command:   app.Command,
+		Env:       envList,
+		Resources: app.Resources,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create new container: %w", err)
+	}
+	newContainer.AppID = appID
+	newContainer.RestartCount = container.RestartCount + 1
+
+	if err := m.store.CreateContainer(newContainer); err != nil {
+		m.runtime.RemoveContainer(ctx, newContainer.ID)
+		return fmt.Errorf("failed to persist new container: %w", err)
+	}
+
+	if err := m.runtime.StartContainer(ctx, newContainer.ID); err != nil {
+		m.store.DeleteContainer(newContainer.ID)
+		m.runtime.RemoveContainer(ctx, newContainer.ID)
+		return fmt.Errorf("failed to start new container: %w", err)
+	}
+
+	// Set up networking
+	if m.network != nil {
+		pid, err := m.runtime.GetContainerPID(newContainer.ID)
+		if err == nil {
+			netInfo, err := m.network.SetupContainerNetwork(ctx, newContainer.ID, pid)
+			if err == nil {
+				newContainer.IP = netInfo.IP.String()
+				newContainer.PID = pid
+			}
+		}
+	}
+
+	now := time.Now()
+	newContainer.State = store.ContainerStateRunning
+	newContainer.StartedAt = &now
+	m.store.UpdateContainer(newContainer)
+
+	// Re-register with health monitor
+	if m.healthMonitor != nil {
+		check := buildHealthCheck(nil, newContainer) // Default health check
+		m.healthMonitor.RegisterContainer(newContainer.ID, appID, check)
+	}
+
+	m.logger.Info("container restarted",
+		"old", containerID[:12],
+		"new", newContainer.ID[:12],
+		"app", appID,
+		"restart_count", newContainer.RestartCount)
+
 	return nil
 }
 

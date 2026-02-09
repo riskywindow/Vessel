@@ -14,7 +14,8 @@ var (
 	bucketApps       = []byte("apps")
 	bucketContainers = []byte("containers")
 	bucketDeploys    = []byte("deploys")
-	bucketSecrets    = []byte("secrets")
+	bucketSecrets       = []byte("secrets")
+	bucketHealthResults = []byte("health_results")
 )
 
 // Store provides persistent state storage using BBolt.
@@ -49,6 +50,12 @@ type Store interface {
 	GetSecret(key string) (*Secret, error)
 	ListSecretKeys() ([]string, error)
 	DeleteSecret(key string) error
+
+	// Health result operations
+	CreateHealthResult(result *HealthResult) error
+	GetHealthResults(containerID string, limit int) ([]*HealthResult, error)
+	GetLatestHealthResult(containerID string) (*HealthResult, error)
+	PruneHealthResults(containerID string, keep int) error
 
 	// Lifecycle
 	Close() error
@@ -91,6 +98,7 @@ func (s *BoltStore) initBuckets() error {
 			bucketContainers,
 			bucketDeploys,
 			bucketSecrets,
+			bucketHealthResults,
 		}
 
 		for _, name := range buckets {
