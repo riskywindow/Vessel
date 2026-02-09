@@ -145,6 +145,15 @@ func (s *Server) setupRoutes() {
 
 	// System info
 	r.Get("/api/system", s.handler.GetSystemInfo)
+
+	// WebSocket endpoints
+	r.Route("/api/ws", func(r chi.Router) {
+		r.Get("/containers/{id}/logs", s.handler.StreamContainerLogs)
+		r.Get("/containers/{id}/metrics", s.handler.StreamContainerMetrics)
+		r.Get("/metrics", s.handler.StreamAllMetrics)
+		r.Get("/health", s.handler.StreamHealth)
+		r.Get("/events", s.handler.StreamEvents)
+	})
 }
 
 // Start starts the API server. It blocks until the server is shut down.
@@ -190,6 +199,10 @@ func apiKeyAuth(validKeys []string) func(http.Handler) http.Handler {
 				if len(auth) > 7 && auth[:7] == "Bearer " {
 					key = auth[7:]
 				}
+			}
+			if key == "" {
+				// Also check api_key query param (for WebSocket clients)
+				key = r.URL.Query().Get("api_key")
 			}
 
 			if key == "" || !keySet[key] {

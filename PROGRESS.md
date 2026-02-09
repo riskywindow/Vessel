@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 6 — Web Dashboard
 
-### Status: IN PROGRESS (Session 1 — REST API Layer)
+### Status: IN PROGRESS (Session 2 — WebSocket Streaming)
 
 ---
 
@@ -176,7 +176,7 @@
 
 ### Week 12: Backend API + Dashboard Skeleton
 - [x] REST API for all operations (Session 19)
-- [ ] WebSocket endpoints for logs and metrics
+- [x] WebSocket endpoints for logs and metrics (Session 20)
 - [x] API key authentication (Session 19)
 - [ ] React + TypeScript + Tailwind scaffold
 - [ ] App list view
@@ -1393,3 +1393,84 @@ GET    /api/system                        # System info
 
 **Next:**
 - Phase 6 continued: WebSocket endpoints for log/metric streaming, React dashboard scaffold
+
+### Session 20 — 2026-02-09 ✅
+**Task:** Phase 6 Session 2 — WebSocket Streaming for Real-Time Data
+
+**Completed:**
+- Added `github.com/gorilla/websocket` v1.5.3 dependency
+- Implemented WebSocket handlers (`internal/api/websocket.go`, ~340 lines):
+  - `WSMessage` struct: unified message format with Type, Timestamp, Data
+  - `StreamContainerLogs`: real-time log streaming via WebSocket with follow=true
+    - Reads from runtime.ContainerLogs, streams line-by-line via bufio.Scanner
+    - Client disconnect detection via ReadMessage goroutine
+  - `StreamContainerMetrics`: per-container metric updates every 2 seconds
+    - Sends initial metric immediately, then periodic via ticker
+    - Error messages on stats failure
+  - `StreamAllMetrics`: metrics for all running containers every 2 seconds
+    - Queries store for containers, filters to running, collects stats
+  - `StreamHealth`: health status updates via event subscription
+    - Sends initial status snapshot, then streams HealthEvents
+    - Uses HealthMonitor.Subscribe()/Unsubscribe() for event delivery
+    - Graceful handling when health monitor is nil
+  - `StreamEvents`: combined event stream (health + periodic state refresh)
+    - Subscribes to health events when monitor available
+    - Periodic state refresh every 5 seconds (apps + health)
+    - Sets healthCh to nil on channel close (prevents busy loop)
+  - Helper methods: sendMetric, sendAllMetrics, sendFullState
+- Added WebSocket routes to `internal/api/server.go`:
+  - `/api/ws/containers/{id}/logs` — log streaming
+  - `/api/ws/containers/{id}/metrics` — per-container metrics
+  - `/api/ws/metrics` — all-container metrics
+  - `/api/ws/health` — health event streaming
+  - `/api/ws/events` — combined event stream
+- Updated auth middleware for WebSocket support:
+  - Added `api_key` query parameter check (for browser WebSocket API)
+  - WebSocket clients can authenticate via X-API-Key header, Bearer token, or query param
+- Wrote comprehensive test suite (`internal/api/websocket_test.go`, 25 tests):
+  - Log streaming: upgrade succeeds, streams log lines, error on bad container, follow enabled
+  - Metrics: sends initial metric, periodic updates (2s), error on stats failure
+  - All metrics: sends initial, skips stopped containers
+  - Health: no monitor sends error, sends initial status, streams events
+  - Events: sends initial state, periodic refresh (5s)
+  - Auth: query param accepted/rejected, header accepted, no key rejected, no keys allows all
+  - Client disconnect: logs handler cleanup, metrics handler cleanup
+  - WSMessage: JSON serialization, all message types
+  - Routes: all 5 WebSocket routes registered
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 14 packages pass
+- `go vet ./...` — clean
+- api: 67 tests (was 42, +25 new WebSocket tests)
+- cli: 37, config: 30, daemon: 10, health: 62, manager: 83, network: 60, runtime: 24, store: 27
+- progress: 18, styles: 17, ssh: 15
+- **Total: ~450 unit tests across all packages**
+
+**Dependencies Added:**
+- `github.com/gorilla/websocket` v1.5.3 (WebSocket protocol support)
+
+**Architecture Decisions:**
+- gorilla/websocket used for WebSocket upgrade and message handling
+- Upgrader allows all origins (CheckOrigin returns true) — production should restrict
+- Auth supports query param `api_key` for browser WebSocket API (can't set custom headers)
+- WebSocket routes under `/api/ws/` prefix, inside auth middleware
+- Client disconnect detected via ReadMessage goroutine (returns error on close)
+- Context cancellation propagates from disconnect → stops streaming
+- Metric streaming uses 2s ticker; event streaming uses 5s state refresh
+- Health streaming uses HealthMonitor.Subscribe() for real-time events
+- StreamEvents combines health subscription + periodic state refresh
+- Nil-safe: health monitor, metrics collector handled gracefully
+- WSMessage is the unified format: type field distinguishes log/metric/health/error/state
+
+**WebSocket Endpoints:**
+```
+WS  /api/ws/containers/{id}/logs      # Real-time log streaming
+WS  /api/ws/containers/{id}/metrics   # Per-container metrics (2s interval)
+WS  /api/ws/metrics                   # All-container metrics (2s interval)
+WS  /api/ws/health                    # Health event streaming
+WS  /api/ws/events                    # Combined event stream (5s refresh)
+```
+
+**Next:**
+- Phase 6 continued: React + TypeScript dashboard scaffold
