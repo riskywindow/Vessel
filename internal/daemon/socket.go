@@ -96,6 +96,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		h.handleDeployHistory(ctx, conn, req.Params)
 	case "containers.list":
 		h.handleListContainers(ctx, conn, req.Params)
+	case "containers.get":
+		h.handleGetContainer(ctx, conn, req.Params)
+	case "containers.find_by_app":
+		h.handleFindContainersByApp(ctx, conn, req.Params)
 	case "containers.logs":
 		h.handleContainerLogs(ctx, conn, req.Params)
 	case "containers.stats":
@@ -300,6 +304,55 @@ func (h *Handler) handleListContainers(ctx context.Context, conn net.Conn, param
 		return
 	}
 	h.writeData(conn, containers)
+}
+
+func (h *Handler) handleGetContainer(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+	if h.store == nil {
+		h.writeError(conn, "STORE_UNAVAILABLE", "store not initialized")
+		return
+	}
+	container, err := h.store.GetContainer(p.ID)
+	if err != nil {
+		h.writeError(conn, "CONTAINER_NOT_FOUND", err.Error())
+		return
+	}
+	h.writeData(conn, container)
+}
+
+func (h *Handler) handleFindContainersByApp(ctx context.Context, conn net.Conn, params json.RawMessage) {
+	var p struct {
+		AppName string `json:"app_name"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		h.writeError(conn, "INVALID_PARAMS", err.Error())
+		return
+	}
+
+	// Get containers for this app and filter to running only
+	containers, err := h.manager.GetContainers(ctx, p.AppName)
+	if err != nil {
+		h.writeError(conn, "LIST_FAILED", err.Error())
+		return
+	}
+
+	var running []*store.Container
+	for _, c := range containers {
+		if c.State == store.ContainerStateRunning {
+			running = append(running, c)
+		}
+	}
+	if running == nil {
+		running = []*store.Container{}
+	}
+
+	h.writeData(conn, running)
 }
 
 func (h *Handler) handleContainerLogs(ctx context.Context, conn net.Conn, params json.RawMessage) {

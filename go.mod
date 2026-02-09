@@ -9,11 +9,12 @@ require (
 	github.com/google/go-containerregistry v0.20.7
 	github.com/spf13/cobra v1.10.1
 	go.etcd.io/bbolt v1.3.9
-	golang.org/x/sys v0.40.0
+	golang.org/x/sys v0.41.0
 )
 
 require (
 	github.com/containerd/stargz-snapshotter/estargz v0.18.1 // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/docker/cli v29.0.3+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect
@@ -30,6 +31,7 @@ require (
 	golang.org/x/mod v0.31.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/term v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/tools v0.40.0 // indirect
 )

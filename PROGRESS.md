@@ -5,9 +5,9 @@
 
 ---
 
-## Current Phase: PHASE 4 — Health Monitoring & Reliability
+## Current Phase: PHASE 5 — CLI Polish & Remote Deploy
 
-### Status: COMPLETE (Sessions 1-3 COMPLETE — Health Monitor, Auto-Restart, Resource Metrics, Webhook Alerting)
+### Status: IN PROGRESS (Session 1 — `vessel exec` COMPLETE)
 
 ---
 
@@ -161,11 +161,11 @@
 - [x] Store reference added to socket Handler for health history queries
 - [x] 15 new tests (alerter unit tests + monitor integration)
 
-## Phase 5: CLI Polish & Remote Deploy (Week 11) — NOT STARTED
+## Phase 5: CLI Polish & Remote Deploy (Week 11) — IN PROGRESS
 - [ ] Styled terminal output (lipgloss)
 - [ ] Progress indicators for image pulls and deploys
 - [x] `vessel init` — interactive setup (moved to Phase 2 Week 7)
-- [ ] `vessel exec` — run command inside container
+- [x] `vessel exec` — run command inside container (Session 15)
 - [ ] `vessel ssh` — remote deploy via SSH
 - [ ] Shell autocomplete (bash, zsh, fish)
 - [ ] `vessel doctor` — system prerequisites check
@@ -967,3 +967,67 @@
 - AlertingConfig in vessel.toml via [alerting] section
 
 **Phase 4 is COMPLETE. Next: Phase 5 — CLI Polish & Remote Deploy**
+
+### Session 15 — 2026-02-09 ✅
+**Task:** Phase 5 Session 1 — `vessel exec` (Run Commands Inside Containers)
+
+**Completed:**
+- Implemented full exec support with TTY and non-interactive modes
+- Created `internal/runtime/exec.go` (~145 lines):
+  - `ExecOptions` struct: ContainerID, Command, TTY, Interactive, Env, WorkDir, User, Stdin/Stdout/Stderr
+  - `ExecResult` struct: ExitCode
+  - `RunExec()`: standalone function using nsenter to enter PID/mount/UTS/IPC/net namespaces
+  - `execWithTTY()`: pseudo-terminal allocation via creack/pty, raw terminal mode via x/term
+  - `execWithoutTTY()`: standard stdin/stdout/stderr piping
+  - `buildExecResult()`: exit code extraction from exec.ExitError
+  - SIGWINCH handling for terminal resize propagation
+- Updated `ExecInContainer` in `internal/runtime/container.go`:
+  - Replaced "not yet implemented" stub with working delegation to Exec()
+  - Returns error on non-zero exit code (for health check compatibility)
+  - Health command checks now functional
+- Implemented `vessel exec` CLI (`internal/cli/exec.go`, ~155 lines):
+  - Flags: -i/--interactive, -t/--tty, -c/--container, -e/--env, -w/--workdir, -u/--user
+  - Auto-detects TTY when stdin is a terminal and command is a shell
+  - -i implies -t automatically
+  - `resolveContainer()`: finds running container via daemon socket
+  - Supports both app name and specific container ID (-c flag)
+  - Short container ID matching (12-char prefix)
+  - Exit code propagation (container exit code becomes vessel exit code)
+- Added daemon socket handlers (`internal/daemon/socket.go`):
+  - `containers.get`: look up a specific container by ID
+  - `containers.find_by_app`: return running containers for an app name
+- Wrote 17 new tests (`internal/runtime/exec_test.go`):
+  - RunExec validation: invalid PID, negative PID, empty command, nil command
+  - buildExecResult: nil error, exit code 42, exit code 1, exit code 0
+  - ExecOptions: default values verification
+  - execWithoutTTY: stdout capture, stderr capture, exit code propagation, stdin pipe, command not found
+  - ExecResult zero value, context cancellation
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 8 packages pass
+- `go vet ./...` — clean
+- runtime: 24 tests (was 7, +17 new exec tests)
+- config: 26, daemon: 10, health: 62, manager: 83, network: 60, store: 27
+- **Total: ~292 unit tests across all packages**
+
+**Dependencies Added:**
+- `github.com/creack/pty` v1.1.24 (PTY allocation for interactive exec)
+- `golang.org/x/term` v0.40.0 (terminal raw mode for TTY support)
+
+**Architecture Decisions:**
+- `RunExec()` is a standalone function (not on LinuxRuntime) accepting PID directly
+  - CLI gets PID from daemon, calls RunExec without needing full runtime instance
+  - LinuxRuntime.Exec() wraps RunExec with PID lookup from container state
+- Uses nsenter for namespace entry (simpler than raw setns syscalls)
+  - Enters PID, mount, UTS, IPC, and network namespaces
+  - Supports --wd flag for working directory inside container
+- TTY mode: creack/pty allocates pseudo-terminal, x/term sets raw mode
+  - SIGWINCH forwarded for terminal resize
+  - Terminal restored on exit (deferred)
+- Non-TTY mode: direct stdin/stdout/stderr piping with configurable writers
+- Health checks (health/checker.go) now work via ExecInContainer delegation
+- CLI auto-detects TTY for shell commands (sh, bash, zsh, ash)
+
+**Next:**
+- Phase 5 continued: `vessel doctor`, shell autocomplete, styled output

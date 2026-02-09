@@ -556,9 +556,22 @@ func (r *LinuxRuntime) GetImageStore() *ImageStore {
 }
 
 // ExecInContainer executes a command in a running container.
-// TODO: Implement in future session.
+// This is the simplified interface used by health checks and other internal callers.
+// For interactive use with TTY support, use Exec() instead.
 func (r *LinuxRuntime) ExecInContainer(ctx context.Context, containerID string, cmd []string) error {
-	return fmt.Errorf("not yet implemented")
+	result, err := r.Exec(ctx, ExecOptions{
+		ContainerID: containerID,
+		Command:     cmd,
+		Interactive: false,
+		TTY:         false,
+	})
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("command exited with code %d", result.ExitCode)
+	}
+	return nil
 }
 
 // ContainerStats returns resource usage statistics for a container.
