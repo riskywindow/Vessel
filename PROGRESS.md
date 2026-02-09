@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 5 — CLI Polish & Remote Deploy
 
-### Status: IN PROGRESS (Session 3 — progress indicators & shell completion COMPLETE)
+### Status: COMPLETE (Session 4 — SSH remote deploy & remote management)
 
 ---
 
@@ -161,12 +161,13 @@
 - [x] Store reference added to socket Handler for health history queries
 - [x] 15 new tests (alerter unit tests + monitor integration)
 
-## Phase 5: CLI Polish & Remote Deploy (Week 11) — IN PROGRESS
+## Phase 5: CLI Polish & Remote Deploy (Week 11) — COMPLETE
 - [x] Styled terminal output (lipgloss) — Session 16
 - [x] Progress indicators for image pulls and deploys — Session 17
 - [x] `vessel init` — interactive setup (moved to Phase 2 Week 7)
 - [x] `vessel exec` — run command inside container (Session 15)
-- [ ] `vessel ssh` — remote deploy via SSH
+- [x] `vessel ssh` — remote deploy via SSH — Session 18
+- [x] `vessel remote` — manage remote server configs — Session 18
 - [x] Shell autocomplete (bash, zsh, fish) — Session 17
 - [x] `vessel doctor` — system prerequisites check (Session 16)
 - [x] `vessel fmt` — config validation and formatting (moved to Phase 2 Week 7)
@@ -1179,4 +1180,91 @@
 - All spinner output goes to stderr (keeps stdout clean for JSON/pipe)
 
 **Next:**
-- Phase 5 continued: `vessel ssh` (remote deploy via SSH)
+- Phase 5 Session 4: `vessel ssh` (remote deploy via SSH)
+
+### Session 18 — 2026-02-09 ✅
+**Task:** Phase 5 Session 4 (Final) — SSH Remote Deploy & Remote Management
+
+**Completed:**
+- Created SSH client package (`internal/ssh/ssh.go`, ~175 lines):
+  - `Config` struct: Host, User, Port, KeyFile
+  - `NewClient()`: creates SSH client with defaults (port 22, $USER)
+  - `Connect()`: establishes SSH tunnel via Unix socket forwarding (`-L local:remote`)
+  - `Close()`: kills tunnel process, cleans up socket
+  - `CopyFile()`: SCP local file to remote server
+  - `RunCommand()`: execute command on remote via SSH
+  - `RunCommandOutput()`: capture remote command output
+  - `CheckVessel()`: verify Vessel is installed on remote
+  - `CheckDaemon()`: verify daemon socket exists on remote
+  - `ParseTarget()`: parse "user@host" strings
+  - `buildSSHArgs()`: common SSH args with optional key file
+  - SSH options: ExitOnForwardFailure, ServerAliveInterval, ConnectTimeout, accept-new
+- Implemented `vessel ssh` CLI (`internal/cli/ssh.go`, ~395 lines):
+  - `vessel ssh <user@host> [command] [args...]`
+  - Named remote resolution from vessel.toml `[[remote]]` sections
+  - Smart routing: interactive commands (exec, logs -f, health watch) use direct SSH
+  - Non-interactive commands (ps, deploy, stop, rm, health, stats, history) use tunneled daemon socket
+  - Config file sync: auto-SCP config to remote before deploy
+  - Remote command implementations: runRemotePS, runRemoteDeploy, runRemoteStop, runRemoteRm,
+    runRemoteHealth, runRemoteStats, runRemoteHistory, runRemoteLogs, runRemoteRollback
+  - Spinner with progress feedback during connection
+  - Signal handling (Ctrl+C gracefully closes tunnel)
+  - All output styled with lipgloss
+- Added `RemoteConfig` struct to config types (`internal/config/types.go`):
+  - `[[remote]]` TOML array of tables support
+  - Fields: Name, Host, User, Port, KeyFile
+- Implemented `vessel remote` CLI (`internal/cli/remote.go`, ~190 lines):
+  - `vessel remote list`: tabular display of configured remotes
+  - `vessel remote add <name> <user@host>`: add remote with optional -p/-i flags
+  - `vessel remote remove <name>`: remove remote from config
+  - `writeRemotesToConfig()`: TOML-aware config file update (preserves non-remote sections)
+  - Duplicate name detection
+  - All subcommands support `--json` output mode
+- Added SSH sentinel errors to `internal/errors.go`:
+  - `ErrSSHConnectionFailed`, `ErrRemoteVesselNotFound`, `ErrRemoteNotFound`
+- Registered `sshCmd` and `remoteCmd` in root.go (now 20 subcommands)
+- Wrote comprehensive test suite (35 new tests):
+  - `internal/ssh/ssh_test.go` (15 tests):
+    - NewClient: defaults, custom config, zero port, empty user
+    - ParseTarget: user@host (4 cases), host only, multiple @ signs
+    - Client accessors: Host, User, Port, SocketPath (before connect)
+    - Close: no tunnel (no panic)
+    - buildSSHArgs: with/without key file
+    - Connect: empty host error
+  - `internal/cli/ssh_test.go` (16 tests):
+    - SSHCommand: exists, registered in root, flags (port, identity)
+    - RemoteCommand: registered in root, subcommands (list, add, remove)
+    - needsDirectSSH: 10 cases (exec, logs -f, health watch, ps, deploy, etc.)
+    - shouldSyncConfig: 5 cases (deploy --config, -c, plain deploy)
+    - getConfigFromArgs: 6 cases (various flag positions, missing values)
+    - replaceConfigPath: standard, short flag, no config flag
+    - resolveSSHTarget: user@host, host only, named remote, named not found
+  - `internal/config/remote_test.go` (4 tests):
+    - RemoteConfig parse (2 remotes with all fields)
+    - Empty remotes (config without [[remote]])
+    - Remotes alongside apps
+    - Port default (unset = 0, caller applies 22)
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 13 packages pass
+- `go vet ./...` — clean
+- ssh: 15 tests (new package)
+- cli: 37 tests (was 21, +16 new)
+- config: 30 tests (was 26, +4 new)
+- daemon: 10, health: 62, manager: 83, network: 60, runtime: 24, store: 27
+- progress: 18, styles: 17
+- **Total: ~383 unit tests across all packages**
+
+**Architecture Decisions:**
+- SSH uses `os/exec` with the system `ssh` binary (not a Go SSH library) — simpler, leverages user's SSH config/agent
+- Unix socket forwarding via `ssh -L local:remote` for daemon RPC
+- Interactive commands (exec, logs -f) run directly via SSH (needs TTY/streaming)
+- Non-interactive commands use tunneled socket for structured daemon RPC responses
+- Named remotes resolved from vessel.toml `[[remote]]` sections before ParseTarget fallback
+- Config file sync via SCP before remote deploy
+- Remote management persists to vessel.toml (TOML-aware, preserves other sections)
+- No new Go dependencies (uses system ssh/scp binaries)
+- SSH client in standalone `internal/ssh/` package (no dependency on cli or daemon)
+
+**Phase 5 is COMPLETE. Next: Phase 6 — Web Dashboard**

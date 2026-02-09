@@ -36,4 +36,9 @@ var (
 	// Store errors
 	ErrStoreCorrupted = errors.New("data store corrupted")
 	ErrSecretNotFound = errors.New("secret not found")
+
+	// SSH errors
+	ErrSSHConnectionFailed = errors.New("SSH connection failed")
+	ErrRemoteVesselNotFound = errors.New("vessel not found on remote server")
+	ErrRemoteNotFound       = errors.New("remote not found")
 )

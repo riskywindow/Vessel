@@ -16,6 +16,9 @@ type Config struct {
 
 	// Apps is a list of application configurations.
 	Apps []AppConfig `toml:"app" json:"apps"`
+
+	// Remotes is a list of remote server configurations for SSH deployment.
+	Remotes []RemoteConfig `toml:"remote" json:"remotes,omitempty"`
 }
 
 // AlertingConfig configures webhook alerting behavior.
@@ -148,6 +151,24 @@ type VolumeConfig struct {
 
 	// ReadOnly indicates if the mount is read-only.
 	ReadOnly bool `toml:"readonly" json:"readonly"`
+}
+
+// RemoteConfig defines a remote server for SSH deployment.
+type RemoteConfig struct {
+	// Name is the alias for this remote (e.g., "prod", "staging").
+	Name string `toml:"name" json:"name"`
+
+	// Host is the SSH hostname or IP address.
+	Host string `toml:"host" json:"host"`
+
+	// User is the SSH username.
+	User string `toml:"user" json:"user"`
+
+	// Port is the SSH port (default 22).
+	Port int `toml:"port" json:"port,omitempty"`
+
+	// KeyFile is the path to the SSH private key (optional).
+	KeyFile string `toml:"key_file" json:"key_file,omitempty"`
 }
 
 // Duration is a wrapper around time.Duration for TOML parsing.
