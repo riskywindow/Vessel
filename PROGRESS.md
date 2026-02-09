@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 5 — CLI Polish & Remote Deploy
 
-### Status: IN PROGRESS (Session 2 — `vessel doctor` & styled output COMPLETE)
+### Status: IN PROGRESS (Session 3 — progress indicators & shell completion COMPLETE)
 
 ---
 
@@ -163,11 +163,11 @@
 
 ## Phase 5: CLI Polish & Remote Deploy (Week 11) — IN PROGRESS
 - [x] Styled terminal output (lipgloss) — Session 16
-- [ ] Progress indicators for image pulls and deploys
+- [x] Progress indicators for image pulls and deploys — Session 17
 - [x] `vessel init` — interactive setup (moved to Phase 2 Week 7)
 - [x] `vessel exec` — run command inside container (Session 15)
 - [ ] `vessel ssh` — remote deploy via SSH
-- [ ] Shell autocomplete (bash, zsh, fish)
+- [x] Shell autocomplete (bash, zsh, fish) — Session 17
 - [x] `vessel doctor` — system prerequisites check (Session 16)
 - [x] `vessel fmt` — config validation and formatting (moved to Phase 2 Week 7)
 
@@ -1112,4 +1112,71 @@
 - All styled CLI output uses the same color semantics (green=success, red=error, yellow=warning, gray=muted)
 
 **Next:**
-- Phase 5 continued: shell autocomplete, progress indicators, `vessel ssh`
+- Phase 5 continued: `vessel ssh` (remote deploy via SSH)
+
+### Session 17 — 2026-02-09 ✅
+**Task:** Phase 5 Session 3 — Progress Indicators & Shell Completion
+
+**Completed:**
+- Added `github.com/briandowns/spinner` v1.23.2 dependency for terminal spinners
+- Created progress package (`internal/cli/progress/progress.go`, ~155 lines):
+  - `Spinner` struct wrapping briandowns/spinner with Start/Stop/Success/Fail/UpdateMessage
+  - `ProgressBar` struct with Add/Set/Finish/Percent, rate-limited redraws (50ms)
+  - `ProgressWriter` wrapping io.Writer with progress tracking
+  - Configurable writer for testability (defaults to os.Stderr)
+- Updated `vessel deploy` (`internal/cli/deploy.go`):
+  - Spinner during deploy operation (replaces static "Deploying..." text)
+  - Success/Fail icons on completion
+  - JSON output bypasses spinner entirely
+- Updated `vessel stop` (`internal/cli/stop.go`):
+  - Spinner during stop operation
+- Updated `vessel rollback` (`internal/cli/rollback.go`):
+  - Spinner during rollback operation
+- Updated `vessel rm` (`internal/cli/rm.go`):
+  - Spinner during remove operation
+- Implemented shell completion (`internal/cli/completion.go`, ~55 lines):
+  - `vessel completion [bash|zsh|fish|powershell]`
+  - Full help text with installation instructions for each shell
+  - Uses cobra's built-in GenBashCompletion/GenZshCompletion/GenFishCompletion/GenPowerShellCompletionWithDesc
+- Implemented dynamic app name completion (`internal/cli/complete.go`, ~30 lines):
+  - `completeAppNames()` queries daemon for running apps via `apps.list`
+  - Returns app names as completion suggestions, NoFileComp directive
+  - Graceful error handling when daemon is unavailable
+- Added `ValidArgsFunction: completeAppNames` to 8 commands:
+  - exec, stop, rm, logs, rollback, health, stats, history
+- Registered `completionCmd` in root.go (now 18 subcommands)
+- Fixed flag shorthand conflict: exec `--container` no longer uses `-c` shorthand
+  (conflicted with root `--config -c` persistent flag, caused panic during completion generation)
+- Wrote comprehensive test suite (28 new tests):
+  - `internal/cli/progress/progress_test.go` (18 tests):
+    - Spinner: constructor, start/stop, success output, fail output, update message
+    - ProgressBar: constructor, percent empty/partial/full/overflow, add, set, finish, draw
+    - ProgressWriter: constructor, write, tracks progress, finish
+  - `internal/cli/completion_test.go` (10 tests):
+    - Command: exists, valid args, bash/zsh/fish/powershell generation
+    - Registration: completion in root, all 8 commands have ValidArgsFunction
+    - completeAppNames: no args (daemon error), with existing args (returns empty)
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all 12 packages pass
+- `go vet ./...` — clean
+- progress: 18 tests (new package)
+- cli: 21 tests (was 11, +10 new completion tests)
+- config: 26, daemon: 10, health: 62, manager: 83, network: 60, runtime: 24, store: 27, styles: 17
+- **Total: ~348 unit tests across all packages**
+
+**Dependencies Added:**
+- `github.com/briandowns/spinner` v1.23.2 (terminal spinners)
+
+**Architecture Decisions:**
+- Progress package is standalone in `internal/cli/progress/` (not mixed with styles)
+- Spinner wraps briandowns/spinner for simple start/success/fail pattern
+- ProgressBar and ProgressWriter support tracking known-size operations (image pulls)
+- Completion uses cobra's built-in generators (no custom completion logic)
+- Dynamic completion queries daemon — returns error directive if daemon unavailable
+- Fixed `-c` shorthand conflict between root `--config` and exec `--container`
+- All spinner output goes to stderr (keeps stdout clean for JSON/pipe)
+
+**Next:**
+- Phase 5 continued: `vessel ssh` (remote deploy via SSH)

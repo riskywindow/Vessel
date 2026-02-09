@@ -22,8 +22,9 @@ Examples:
   vessel logs myapp           # Show recent logs
   vessel logs myapp -f        # Follow log output
   vessel logs myapp --tail 50 # Show last 50 lines`,
-	Args: cobra.ExactArgs(1),
-	RunE: runLogs,
+	Args:              cobra.ExactArgs(1),
+	RunE:              runLogs,
+	ValidArgsFunction: completeAppNames,
 }
 
 func init() {

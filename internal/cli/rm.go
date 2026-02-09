@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/progress"
 	"github.com/vessel/vessel/internal/daemon"
 )
 
@@ -20,8 +21,9 @@ This stops any running containers and removes all state for the app.
 Examples:
   vessel rm myapp
   vessel rm myapp --force     # Remove without confirmation`,
-	Args: cobra.ExactArgs(1),
-	RunE: runRemoveApp,
+	Args:              cobra.ExactArgs(1),
+	RunE:              runRemoveApp,
+	ValidArgsFunction: completeAppNames,
 }
 
 func init() {
@@ -44,14 +46,16 @@ func runRemoveApp(cmd *cobra.Command, args []string) error {
 	}
 
 	client := daemon.NewClient("")
-	fmt.Printf("Removing %s... ", appName)
+
+	spin := progress.NewSpinner(fmt.Sprintf("Removing %s", appName))
+	spin.Start()
 
 	var result map[string]string
 	if err := client.Call("apps.remove", map[string]string{"name": appName}, &result); err != nil {
-		fmt.Println("failed")
+		spin.Fail(fmt.Sprintf("Failed to remove %s: %v", appName, err))
 		return err
 	}
 
-	fmt.Println("done")
+	spin.Success(fmt.Sprintf("%s removed", appName))
 	return nil
 }

@@ -3,10 +3,10 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/progress"
 	"github.com/vessel/vessel/internal/cli/styles"
 	"github.com/vessel/vessel/internal/config"
 	"github.com/vessel/vessel/internal/daemon"
@@ -191,31 +191,39 @@ func getAppVersion(client *daemon.Client, appName string) int {
 }
 
 func deployOneApp(client *daemon.Client, appCfg *config.AppConfig) error {
-	fmt.Printf("Deploying %s (image: %s, strategy: %s, instances: %d)...\n",
-		appCfg.Name, appCfg.Image, appCfg.Deploy.Strategy, appCfg.Instances)
-
-	var deploy store.Deploy
-	err := client.Call("apps.deploy_config", appCfg, &deploy)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  %s %s deploy failed: %v\n",
-			styles.ErrorIcon(), styles.AppName.Render(appCfg.Name), err)
-		return err
-	}
-
 	if jsonOutput {
+		// No spinner for JSON output
+		var deploy store.Deploy
+		err := client.Call("apps.deploy_config", appCfg, &deploy)
+		if err != nil {
+			return err
+		}
 		data, _ := json.MarshalIndent(deploy, "", "  ")
 		fmt.Println(string(data))
 		return nil
 	}
 
+	spin := progress.NewSpinner(fmt.Sprintf("Deploying %s (image: %s, strategy: %s, instances: %d)",
+		appCfg.Name, appCfg.Image, appCfg.Deploy.Strategy, appCfg.Instances))
+	spin.Start()
+
+	var deploy store.Deploy
+	err := client.Call("apps.deploy_config", appCfg, &deploy)
+
+	if err != nil {
+		spin.Fail(fmt.Sprintf("%s deploy failed: %v",
+			styles.AppName.Render(appCfg.Name), err))
+		return err
+	}
+
 	if deploy.Status == store.DeployStatusFailed {
-		fmt.Fprintf(os.Stderr, "  %s %s deploy failed: %s. Old version still running.\n",
-			styles.ErrorIcon(), styles.AppName.Render(appCfg.Name), deploy.Error)
+		spin.Fail(fmt.Sprintf("%s deploy failed: %s. Old version still running.",
+			styles.AppName.Render(appCfg.Name), deploy.Error))
 		return fmt.Errorf("deploy failed for %s", appCfg.Name)
 	}
 
-	fmt.Printf("  %s %s deployed successfully (%s)\n",
-		styles.SuccessIcon(), styles.AppName.Render(appCfg.Name),
-		styles.Version.Render(fmt.Sprintf("v%d", deploy.Version)))
+	spin.Success(fmt.Sprintf("%s deployed successfully (%s)",
+		styles.AppName.Render(appCfg.Name),
+		styles.Version.Render(fmt.Sprintf("v%d", deploy.Version))))
 	return nil
 }

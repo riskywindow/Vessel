@@ -26,8 +26,9 @@ Examples:
   vessel health myapp        # Detailed health for 'myapp'
   vessel health check <id>   # Run immediate health check
   vessel health history <id> # Show health check history`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: runHealth,
+	Args:              cobra.MaximumNArgs(1),
+	RunE:              runHealth,
+	ValidArgsFunction: completeAppNames,
 }
 
 var healthCheckCmd = &cobra.Command{

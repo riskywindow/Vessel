@@ -30,6 +30,7 @@ Examples:
   vessel exec my-app -w /tmp -- pwd           # Exec with working directory`,
 	Args:               cobra.MinimumNArgs(1),
 	RunE:               runExec,
+	ValidArgsFunction:  completeAppNames,
 	DisableFlagParsing: false,
 }
 
@@ -45,7 +46,7 @@ var (
 func init() {
 	execCmd.Flags().BoolVarP(&execInteractive, "interactive", "i", false, "Keep STDIN open")
 	execCmd.Flags().BoolVarP(&execTTY, "tty", "t", false, "Allocate a pseudo-TTY")
-	execCmd.Flags().StringVarP(&execContainer, "container", "c", "", "Container ID (default: first running container)")
+	execCmd.Flags().StringVar(&execContainer, "container", "", "Container ID (default: first running container)")
 	execCmd.Flags().StringArrayVarP(&execEnv, "env", "e", nil, "Set environment variables (KEY=VALUE)")
 	execCmd.Flags().StringVarP(&execWorkDir, "workdir", "w", "", "Working directory inside the container")
 	execCmd.Flags().StringVarP(&execUser, "user", "u", "", "Username or UID (format: <name|uid>[:<group|gid>])")

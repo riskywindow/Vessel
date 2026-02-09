@@ -22,8 +22,9 @@ Displays all previous deploys with their version, image, status, and timestamp.
 Examples:
   vessel history myapp
   vessel history myapp --limit 10`,
-	Args: cobra.ExactArgs(1),
-	RunE: runHistory,
+	Args:              cobra.ExactArgs(1),
+	RunE:              runHistory,
+	ValidArgsFunction: completeAppNames,
 }
 
 func init() {

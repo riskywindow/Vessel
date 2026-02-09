@@ -59,6 +59,7 @@ func init() {
 	rootCmd.AddCommand(fmtCmd)
 	rootCmd.AddCommand(networkCmd)
 	rootCmd.AddCommand(certCmd)
+	rootCmd.AddCommand(completionCmd)
 
 	// Register network subcommands
 	networkCmd.AddCommand(networkStatusCmd)

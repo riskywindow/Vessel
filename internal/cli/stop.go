@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/vessel/vessel/internal/cli/progress"
 	"github.com/vessel/vessel/internal/daemon"
 )
 
@@ -17,8 +18,9 @@ The containers are gracefully stopped with SIGTERM, then SIGKILL after the grace
 Examples:
   vessel stop myapp
   vessel stop myapp --grace-period 60s`,
-	Args: cobra.ExactArgs(1),
-	RunE: runStop,
+	Args:              cobra.ExactArgs(1),
+	RunE:              runStop,
+	ValidArgsFunction: completeAppNames,
 }
 
 func init() {
@@ -29,14 +31,16 @@ func runStop(cmd *cobra.Command, args []string) error {
 	appName := args[0]
 
 	client := daemon.NewClient("")
-	fmt.Printf("Stopping %s... ", appName)
+
+	spin := progress.NewSpinner(fmt.Sprintf("Stopping %s", appName))
+	spin.Start()
 
 	var result map[string]string
 	if err := client.Call("apps.stop", map[string]string{"name": appName}, &result); err != nil {
-		fmt.Println("failed")
+		spin.Fail(fmt.Sprintf("Failed to stop %s: %v", appName, err))
 		return err
 	}
 
-	fmt.Println("done")
+	spin.Success(fmt.Sprintf("%s stopped", appName))
 	return nil
 }

@@ -22,8 +22,9 @@ Falls back to live cgroup stats if metrics are unavailable.
 
 Examples:
   vessel stats myapp           # Stats for all containers of an app`,
-	Args: cobra.ExactArgs(1),
-	RunE: runStats,
+	Args:              cobra.ExactArgs(1),
+	RunE:              runStats,
+	ValidArgsFunction: completeAppNames,
 }
 
 func init() {
