@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme {
+  --color-vessel-50: #f0f9ff;
+  --color-vessel-100: #e0f2fe;
+  --color-vessel-200: #bae6fd;
+  --color-vessel-300: #7dd3fc;
+  --color-vessel-400: #38bdf8;
+  --color-vessel-500: #0ea5e9;
+  --color-vessel-600: #0284c7;
+  --color-vessel-700: #0369a1;
+  --color-vessel-800: #075985;
+  --color-vessel-900: #0c4a6e;
+}

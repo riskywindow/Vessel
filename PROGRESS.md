@@ -7,7 +7,7 @@
 
 ## Current Phase: PHASE 6 — Web Dashboard
 
-### Status: IN PROGRESS (Session 2 — WebSocket Streaming)
+### Status: IN PROGRESS (Session 3 — React Dashboard)
 
 ---
 
@@ -178,15 +178,15 @@
 - [x] REST API for all operations (Session 19)
 - [x] WebSocket endpoints for logs and metrics (Session 20)
 - [x] API key authentication (Session 19)
-- [ ] React + TypeScript + Tailwind scaffold
-- [ ] App list view
+- [x] React + TypeScript + Tailwind scaffold (Session 21)
+- [x] App list view (Session 21)
 - [ ] Embed frontend into Go binary
 
 ### Week 13: Dashboard Features
-- [ ] Real-time log viewer
-- [ ] Resource usage graphs
-- [ ] Deploy history timeline with rollback
-- [ ] App detail view
+- [x] Real-time log viewer (Session 21)
+- [x] Resource usage graphs (Session 21)
+- [x] Deploy history timeline with rollback (Session 21)
+- [x] App detail view (Session 21)
 - [ ] Browser-based terminal (xterm.js)
 - [ ] Dark mode, responsive layout
 
@@ -1473,4 +1473,87 @@ WS  /api/ws/events                    # Combined event stream (5s refresh)
 ```
 
 **Next:**
-- Phase 6 continued: React + TypeScript dashboard scaffold
+- Phase 6 continued: Embed frontend into Go binary, dark mode
+
+### Session 21 — 2026-02-09 ✅
+**Task:** Phase 6 Session 3 — React Dashboard Frontend
+
+**Completed:**
+- Initialized Vite + React + TypeScript project in `web/` directory
+- Installed Node.js 22.22.0 (nodesource)
+- Configured Tailwind CSS v4 with `@tailwindcss/vite` plugin and custom vessel color theme
+- Configured Vite with API proxy (`/api` → `localhost:8080`) and WebSocket support
+- Created API client (`web/src/api/client.ts`, ~130 lines):
+  - Axios instance with API key interceptor from localStorage
+  - Full TypeScript types matching Go REST API responses (App, Container, Deploy, HealthStatus, MetricPoint, SystemInfo)
+  - API response unwrapping with typed error handling
+  - 25+ API functions covering apps, containers, health, metrics, secrets, network, certs, system
+- Created WebSocket hook (`web/src/hooks/useWebSocket.ts`, ~65 lines):
+  - Auto-reconnect with 3s delay
+  - Message buffering (last 200 messages)
+  - API key authentication via query parameter
+  - Conditional connection via `enabled` parameter
+- Created utility functions (`web/src/lib/utils.ts`):
+  - `cn()` for Tailwind class merging (clsx + tailwind-merge)
+  - `formatBytes()`, `formatDuration()`, `timeAgo()` helpers
+- Created Layout component (`web/src/components/Layout.tsx`):
+  - Sidebar navigation with 7 routes (Dashboard, Apps, Health, Network, Secrets, Certs, Settings)
+  - Active route highlighting
+  - Lucide React icons
+- Created StatusBadge/StatusDot components for consistent status display
+- Created Dashboard page (`web/src/pages/Dashboard.tsx`):
+  - 4 stat cards (Total Apps, Running Containers, Healthy, Unhealthy)
+  - Applications table with status, instances, health, and last updated
+  - Auto-refresh every 5s via React Query
+- Created Apps page (`web/src/pages/Apps.tsx`):
+  - App cards with container details, IP, PID, restart count
+  - Action buttons: Restart, Stop, Remove with mutations
+- Created App Detail page (`web/src/pages/AppDetail.tsx`):
+  - Container list with status, IP, PID, restarts
+  - CPU and Memory charts via Recharts (LineChart)
+  - Live log streaming via WebSocket
+  - Deploy history table with rollback buttons
+- Created Health page (`web/src/pages/Health.tsx`):
+  - Summary cards (healthy/unhealthy/unknown counts)
+  - Container health table with live WebSocket updates
+  - Container-to-app name resolution
+- Created Network page (`web/src/pages/Network.tsx`):
+  - Route table showing hostname → backend mappings
+- Created Secrets page (`web/src/pages/Secrets.tsx`):
+  - Secret list with add/delete functionality
+  - Add form with key/value inputs
+  - Shows secret reference syntax
+- Created Certs page (`web/src/pages/Certs.tsx`):
+  - TLS status card (enabled, ACME active)
+  - Custom certificates list
+- Created Settings page (`web/src/pages/Settings.tsx`):
+  - Connection status with ping check
+  - API key configuration (persisted to localStorage)
+  - System info display
+- Routing via React Router v7 with 8 routes
+
+**Dependencies:**
+- `@tanstack/react-query` ^5.90.20 (data fetching, caching, mutations)
+- `axios` ^1.13.5 (HTTP client)
+- `react-router-dom` ^7.13.0 (client-side routing)
+- `recharts` ^3.7.0 (charts)
+- `lucide-react` ^0.563.0 (icons)
+- `clsx` ^2.1.1 + `tailwind-merge` ^3.4.0 (class utilities)
+- `tailwindcss` ^4.1.18 + `@tailwindcss/vite` ^4.1.18 (styling)
+
+**Build Results:**
+- `npm run build` — clean (dist: 18.5KB CSS + 710KB JS gzipped to 218KB)
+- `go build ./...` — clean
+- `go test ./...` — all 450 tests pass
+
+**Architecture Decisions:**
+- Tailwind CSS v4 (CSS-based config with `@theme` and `@import "tailwindcss"`, not JS config)
+- Vite dev server proxies `/api` to `localhost:8080` (no CORS issues in development)
+- React Query with 5s stale time and auto-refetch for real-time feel
+- WebSocket hook with auto-reconnect and conditional enabling
+- API client uses typed response unwrapping to handle Vessel's `{data, error}` envelope
+- All pages support empty states with helpful guidance
+- StatusBadge/StatusDot shared components for consistent status rendering
+
+**Next:**
+- Phase 6 continued: Embed frontend into Go binary, dark mode, browser terminal
