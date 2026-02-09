@@ -24,14 +24,27 @@ LDFLAGS=-ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.Bu
 # Install path
 INSTALL_PATH=/usr/local/bin
 
-.PHONY: all build test lint clean install fmt vet deps
+.PHONY: all build build-frontend build-backend build-dev test lint clean install fmt vet deps
 
-# Default target
+# Default target — builds frontend + backend into single binary
 all: build
 
-# Build the binary
-build: $(BINARY_DIR)
+# Build everything: frontend + backend
+build: build-frontend build-backend
+
+# Build frontend and copy to internal/api/dist for embedding
+build-frontend:
+	cd web && npm install && npm run build
+	rm -rf internal/api/dist
+	cp -r web/dist internal/api/dist
+
+# Build the Go binary with embedded frontend
+build-backend: $(BINARY_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/vessel
+
+# Build dev binary (proxies to Vite dev server instead of embedding frontend)
+build-dev: $(BINARY_DIR)
+	$(GOBUILD) -tags dev $(LDFLAGS) -o $(BINARY_DIR)/$(BINARY_NAME) ./cmd/vessel
 
 $(BINARY_DIR):
 	mkdir -p $(BINARY_DIR)
@@ -48,6 +61,8 @@ lint:
 # Clean build artifacts
 clean:
 	rm -rf $(BINARY_DIR)
+	rm -rf web/dist
+	rm -rf internal/api/dist
 	$(GOCMD) clean
 
 # Install to system path

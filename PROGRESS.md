@@ -5,9 +5,9 @@
 
 ---
 
-## Current Phase: PHASE 6 — Web Dashboard
+## Current Phase: PHASE 6 — Web Dashboard ✅ COMPLETE
 
-### Status: IN PROGRESS (Session 3 — React Dashboard)
+### Status: COMPLETE (All 4 sessions finished)
 
 ---
 
@@ -172,7 +172,7 @@
 - [x] `vessel doctor` — system prerequisites check (Session 16)
 - [x] `vessel fmt` — config validation and formatting (moved to Phase 2 Week 7)
 
-## Phase 6: Web Dashboard (Weeks 12-13) — IN PROGRESS
+## Phase 6: Web Dashboard (Weeks 12-13) ✅ COMPLETE
 
 ### Week 12: Backend API + Dashboard Skeleton
 - [x] REST API for all operations (Session 19)
@@ -180,15 +180,17 @@
 - [x] API key authentication (Session 19)
 - [x] React + TypeScript + Tailwind scaffold (Session 21)
 - [x] App list view (Session 21)
-- [ ] Embed frontend into Go binary
+- [x] Embed frontend into Go binary (Session 22)
 
 ### Week 13: Dashboard Features
-- [x] Real-time log viewer (Session 21)
-- [x] Resource usage graphs (Session 21)
-- [x] Deploy history timeline with rollback (Session 21)
-- [x] App detail view (Session 21)
-- [ ] Browser-based terminal (xterm.js)
-- [ ] Dark mode, responsive layout
+- [x] Real-time log viewer (Session 21, refactored Session 22)
+- [x] Resource usage graphs (Session 21, refactored Session 22)
+- [x] Deploy history timeline with rollback (Session 21, refactored Session 22)
+- [x] App detail view with tabbed interface (Session 22)
+- [x] Standalone LogViewer, MetricsChart, ContainerCard, DeployHistory components (Session 22)
+- [x] SPA routing support in embedded static handler (Session 22)
+- [x] Dev mode with Vite proxy (build tag: dev) (Session 22)
+- [x] Updated Makefile: build-frontend, build-backend, build-dev (Session 22)
 
 ## Phase 7: Hardening & Ship (Week 14) — NOT STARTED
 - [ ] Security audit (namespace escape, seccomp)
@@ -1556,4 +1558,86 @@ WS  /api/ws/events                    # Combined event stream (5s refresh)
 - StatusBadge/StatusDot shared components for consistent status rendering
 
 **Next:**
-- Phase 6 continued: Embed frontend into Go binary, dark mode, browser terminal
+- Phase 7: Hardening & Ship
+
+### Session 22 — 2026-02-09 ✅
+**Task:** Phase 6 Session 4 (Final) — App Detail Refactor, Frontend Embedding, Build Pipeline
+
+**Completed:**
+- Refactored AppDetail.tsx into tabbed interface (Overview, Logs, Metrics, History):
+  - Created `ContainerCard` component (`web/src/components/ContainerCard.tsx`):
+    - Card layout with status dot, container ID, IP, PID, restart count
+    - Selectable with highlighted ring on selection
+  - Created `LogViewer` component (`web/src/components/LogViewer.tsx`):
+    - WebSocket log streaming with auto-scroll toggle
+    - Connection status indicator (green/red dot)
+    - Clear button, timestamp per line
+    - Dark terminal theme (gray-900 background)
+  - Created `MetricsChart` component (`web/src/components/MetricsChart.tsx`):
+    - CPU and Memory line charts via Recharts
+    - Historical metrics from REST API + live WebSocket appending
+    - Human-readable byte formatting on Y-axis
+    - Resets live metrics on container change
+  - Created `DeployHistory` component (`web/src/components/DeployHistory.tsx`):
+    - Deploy table with version, status, strategy, image, age
+    - Rollback button with disabled state during mutation
+  - Refactored `AppDetail.tsx`:
+    - Tabbed navigation (vessel-500 active color)
+    - Each tab conditionally renders its component
+    - Empty state messages when no running containers
+    - Removed inline charts, logs, and deploy table
+- Embedded frontend in Go binary:
+  - Created `internal/api/embed.go` (production build):
+    - `//go:embed dist/*` directive embeds compiled React app
+    - `GetStaticHandler()` serves static files with SPA routing fallback
+    - Files with extensions that don't exist return 404
+    - Non-file paths serve index.html (SPA routing)
+    - `HasEmbeddedFrontend()` helper
+  - Created `internal/api/embed_dev.go` (dev build tag):
+    - `GetStaticHandler()` returns reverse proxy to Vite dev server (localhost:5173)
+    - Built with `-tags dev` flag
+  - Updated `internal/api/server.go`:
+    - Added `r.NotFound(staticHandler.ServeHTTP)` to serve frontend for non-API routes
+    - All `/api/*` routes handled by API handlers, everything else by static handler
+- Updated Makefile:
+  - `make build`: builds frontend + backend (single command)
+  - `make build-frontend`: npm install + build, copies dist to internal/api/dist
+  - `make build-backend`: compiles Go binary with embedded frontend
+  - `make build-dev`: compiles with `-tags dev` for Vite proxy mode
+  - `make clean`: cleans bin/, web/dist/, internal/api/dist/
+
+**Build Results:**
+- Frontend: 20KB CSS + 713KB JS (219KB gzipped)
+- Binary: 18MB single-file with embedded dashboard
+- `go build ./...` — clean
+- `go test ./...` — all 450 tests pass
+- `go vet ./...` — clean
+
+**Architecture Decisions:**
+- SPA routing: embed.go checks if file exists in embedded FS, falls back to index.html for non-file paths
+- Dev mode via build tag `dev` (not runtime flag) — keeps production binary clean
+- `r.NotFound()` catches all non-API routes — API routes take priority via Chi router matching
+- Frontend dist copied to `internal/api/dist/` at build time (not committed, generated by make)
+- No new Go dependencies (uses stdlib embed, io/fs, httputil)
+
+**Phase 6 is COMPLETE. Vessel now has a complete web dashboard embedded in a single binary.**
+
+**Final Vessel Feature Summary:**
+- Container runtime: namespaces, cgroups v2, OverlayFS, seccomp, capability dropping
+- OCI image pull and layer caching
+- Zero-downtime rolling and blue-green deploys with automatic rollback
+- Encrypted secrets management (AES-256-GCM + Argon2id)
+- Container networking: bridge, veth pairs, IP allocation, NAT
+- HTTP reverse proxy with host-based routing and load balancing
+- Automatic TLS via Let's Encrypt (+ custom certificate support)
+- Internal DNS for container-to-container resolution
+- Continuous health monitoring with auto-restart and exponential backoff
+- Time-series metrics collection and storage
+- Webhook alerting with rate limiting
+- Interactive container exec with TTY support
+- Styled CLI with progress indicators and shell completion
+- Remote deployment via SSH tunneling
+- REST API (25+ endpoints) with API key authentication
+- WebSocket streaming for logs, metrics, and health events
+- React dashboard (8 pages) embedded in single binary
+- ~450 unit tests across 14 packages

@@ -154,6 +154,10 @@ func (s *Server) setupRoutes() {
 		r.Get("/health", s.handler.StreamHealth)
 		r.Get("/events", s.handler.StreamEvents)
 	})
+
+	// Serve embedded frontend for all non-API routes
+	staticHandler := GetStaticHandler()
+	r.NotFound(staticHandler.ServeHTTP)
 }
 
 // Start starts the API server. It blocks until the server is shut down.
