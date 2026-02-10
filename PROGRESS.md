@@ -5,9 +5,9 @@
 
 ---
 
-## Current Phase: PHASE 6 — Web Dashboard ✅ COMPLETE
+## Current Phase: PHASE 7 — MCP Server 🔧 IN PROGRESS
 
-### Status: COMPLETE (All 4 sessions finished)
+### Status: Session 1 complete (foundation + read-only tools), Session 2 pending (action tools)
 
 ---
 
@@ -192,7 +192,29 @@
 - [x] Dev mode with Vite proxy (build tag: dev) (Session 22)
 - [x] Updated Makefile: build-frontend, build-backend, build-dev (Session 22)
 
-## Phase 7: Hardening & Ship (Week 14) — NOT STARTED
+## Phase 7: MCP Server (Week 14) — IN PROGRESS
+
+### Session 1: MCP Server Foundation ✅
+- [x] MCP protocol types (internal/mcp/protocol.go) — JSON-RPC 2.0, MCP types
+- [x] MCP server core (internal/mcp/server.go) — stdio loop, request dispatch
+- [x] Tool definitions and read-only handlers (internal/mcp/tools.go) — 12 tools
+- [x] Resource handlers (internal/mcp/resources.go) — 3 resources
+- [x] CLI command (internal/cli/mcp.go) — `vessel mcp` with --socket flag
+- [x] 30 tests (protocol, server, tools, resources, handshake)
+- [x] Read-only tools: vessel_list_apps, vessel_get_app, vessel_health, vessel_logs,
+      vessel_metrics, vessel_system_info, vessel_deploy_history
+- [x] Action tools stubbed: vessel_deploy, vessel_stop, vessel_restart, vessel_remove,
+      vessel_rollback (return "Session 2" error)
+
+### Session 2: Action Tools — NOT STARTED
+- [ ] Implement vessel_deploy tool
+- [ ] Implement vessel_stop tool
+- [ ] Implement vessel_restart tool
+- [ ] Implement vessel_remove tool
+- [ ] Implement vessel_rollback tool
+- [ ] Tests for action tools
+
+## Phase 8: Hardening & Ship (Week 15) — NOT STARTED
 - [ ] Security audit (namespace escape, seccomp)
 - [ ] Default seccomp profile
 - [ ] Capability dropping
@@ -1622,6 +1644,71 @@ WS  /api/ws/events                    # Combined event stream (5s refresh)
 
 **Phase 6 is COMPLETE. Vessel now has a complete web dashboard embedded in a single binary.**
 
+### Session 23 — 2026-02-09 ✅
+**Task:** Phase 7 Session 1 — MCP Server Foundation
+
+**Completed:**
+- Created MCP protocol types (`internal/mcp/protocol.go`, ~160 lines):
+  - JSON-RPC 2.0 Request/Response/Error types
+  - MCP InitializeParams/Result, ServerCapabilities, ClientCapabilities
+  - Tool/ToolCall/ToolResult/ContentBlock types
+  - Resource/ResourceContents types
+  - InputSchema/Property for tool parameter definitions
+  - Standard JSON-RPC error codes (ParseError, InvalidRequest, MethodNotFound, InvalidParams, InternalError)
+- Created MCP server core (`internal/mcp/server.go`, ~220 lines):
+  - Server struct with daemon.Client, bufio.Reader (stdin), io.Writer (stdout)
+  - Run() loop: read JSON-RPC lines, dispatch to handlers
+  - handleRequest dispatches: initialize, initialized, tools/list, tools/call,
+    resources/list, resources/read, ping
+  - NewServer (stdio) and NewServerWithIO (custom IO for testing)
+  - Thread-safe response writing via sync.Mutex
+  - Graceful EOF handling, empty line skipping
+- Created tool definitions and handlers (`internal/mcp/tools.go`, ~310 lines):
+  - 12 tool definitions with JSON Schema input schemas
+  - 7 read-only tool implementations via daemon client:
+    - vessel_list_apps: lists all apps with count
+    - vessel_get_app: gets app detail by name
+    - vessel_health: health status (all or per-app, with container filtering)
+    - vessel_logs: gets logs from first running container (configurable tail)
+    - vessel_metrics: resource usage per running container
+    - vessel_system_info: aggregated system stats (app/container/health counts)
+    - vessel_deploy_history: deploy history per app
+  - 5 action tool stubs (return "Session 2" error):
+    vessel_deploy, vessel_stop, vessel_restart, vessel_remove, vessel_rollback
+- Created resource handlers (`internal/mcp/resources.go`, ~40 lines):
+  - vessel://apps — JSON list of all apps
+  - vessel://health — health status of all containers
+  - vessel://system — system info (reuses toolSystemInfo)
+- Created CLI command (`internal/cli/mcp.go`, ~60 lines):
+  - `vessel mcp` command with --socket flag
+  - Logs to stderr (stdout reserved for MCP protocol)
+  - Signal handling (SIGINT/SIGTERM → cancel context)
+  - Registered as 22nd subcommand in root.go
+- Created test suite (`internal/mcp/server_test.go`, ~700 lines, 30 tests):
+  - Protocol: Request/Response marshal/unmarshal, error codes, InitializeResult
+  - Types: ToolResult, ToolResultError, ContentBlock, ServerInfo, ResourceContents
+  - Tool definitions: count (12), validity, required fields
+  - Server: initialize, ping, method not found, parse error, empty lines
+  - Tools: call echo, call error, call unknown, invalid params
+  - Resources: read, read unknown, list, invalid params
+  - Registration: tool registration (12), resource registration (3)
+  - Stubs: all 5 action tools return Session 2 error
+  - Handshake: full initialize → initialized → tools/list sequence
+
+**Test Results:**
+- `go build ./...` — clean
+- `go test ./...` — all ~480 tests pass (30 new in mcp)
+- `go vet ./...` — clean
+
+**Architecture Decisions:**
+- MCP server communicates over stdio (stdin/stdout), logs to stderr
+- Uses daemon.Client to proxy all operations through the Unix socket
+- Tool errors returned as ToolResult with isError=true (MCP convention),
+  not as JSON-RPC errors (which indicate protocol failures)
+- "initialized" notification produces no response (MCP spec)
+- Protocol version: 2024-11-05 (latest MCP spec)
+- No new dependencies (uses stdlib bufio, encoding/json, sync)
+
 **Final Vessel Feature Summary:**
 - Container runtime: namespaces, cgroups v2, OverlayFS, seccomp, capability dropping
 - OCI image pull and layer caching
@@ -1640,4 +1727,5 @@ WS  /api/ws/events                    # Combined event stream (5s refresh)
 - REST API (25+ endpoints) with API key authentication
 - WebSocket streaming for logs, metrics, and health events
 - React dashboard (8 pages) embedded in single binary
-- ~450 unit tests across 14 packages
+- MCP server for AI assistant integration (12 tools, 3 resources)
+- ~480 unit tests across 15 packages
